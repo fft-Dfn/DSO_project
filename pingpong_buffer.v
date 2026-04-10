@@ -129,20 +129,41 @@ module pingpong_buffer #(
         end
     end
 
-    // read side active frame selection: always switch to latest completed bank
+    // read side active frame selection:
+    // keep newest frame in pending, commit only on display frame boundary.
     reg active_bank_rd;
+    reg pending_valid_rd;
+    reg pending_bank_rd;
+    reg [ADDR_W-1:0] pending_frame_start_addr_rd;
     always @(posedge clk_read or negedge rst_n_read) begin
         if (!rst_n_read) begin
-            active_bank_rd          <= 1'b0;
-            frame_valid             <= 1'b0;
-            active_frame_start_addr <= {ADDR_W{1'b0}};
-        end else if (frame_done_pulse_rd) begin
-            active_bank_rd <= done_bank_sync2_rd;
-            frame_valid    <= 1'b1;
-            if (done_bank_sync2_rd == 1'b0)
-                active_frame_start_addr <= frame_start_addr_bank0_rd_sync2;
-            else
-                active_frame_start_addr <= frame_start_addr_bank1_rd_sync2;
+            active_bank_rd              <= 1'b0;
+            frame_valid                 <= 1'b0;
+            active_frame_start_addr     <= {ADDR_W{1'b0}};
+            pending_valid_rd            <= 1'b0;
+            pending_bank_rd             <= 1'b0;
+            pending_frame_start_addr_rd <= {ADDR_W{1'b0}};
+        end else begin
+            if (frame_done_pulse_rd) begin
+                pending_valid_rd <= 1'b1;
+                pending_bank_rd  <= done_bank_sync2_rd;
+                if (done_bank_sync2_rd == 1'b0)
+                    pending_frame_start_addr_rd <= frame_start_addr_bank0_rd_sync2;
+                else
+                    pending_frame_start_addr_rd <= frame_start_addr_bank1_rd_sync2;
+            end
+
+            if (!frame_valid && pending_valid_rd) begin
+                active_bank_rd          <= pending_bank_rd;
+                active_frame_start_addr <= pending_frame_start_addr_rd;
+                frame_valid             <= 1'b1;
+                pending_valid_rd        <= 1'b0;
+            end else if (rd_frame_done && pending_valid_rd) begin
+                active_bank_rd          <= pending_bank_rd;
+                active_frame_start_addr <= pending_frame_start_addr_rd;
+                frame_valid             <= 1'b1;
+                pending_valid_rd        <= 1'b0;
+            end
         end
     end
 
