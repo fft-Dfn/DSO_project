@@ -113,6 +113,43 @@ module hmi_controller (
 
     integer i;
 
+    // Power-up defaults: keep behavior deterministic even if external reset is not pressed.
+    initial begin
+        curr_page      = PAGE_MAIN;
+        curr_cursor    = 4'd0;
+        curr_edit_mode = 1'b0;
+        curr_edit_value = 4'd0;
+        active_src_sel = 3'd0;
+
+        freq_idx[0]  = 2'd1; type_idx[0]  = 2'd0; phase_idx[0] = 2'd0;
+        freq_idx[1]  = 2'd1; type_idx[1]  = 2'd1; phase_idx[1] = 2'd0;
+        freq_idx[2]  = 2'd1; type_idx[2]  = 2'd2; phase_idx[2] = 2'd0;
+        freq_idx[3]  = 2'd1; type_idx[3]  = 2'd3; phase_idx[3] = 2'd0;
+        freq_idx[4]  = 2'd0; type_idx[4]  = 2'd1; phase_idx[4] = 2'd0;
+
+        trig_mode_idx  = 3'd1;
+        trig_edge_idx  = 3'd0;
+        trig_level_idx = 3'd1;
+        sample_div_idx = 3'd0;
+
+        sel_ch1 = 3'd0;
+        sel_ch2 = 3'd1;
+        sel_ch3 = 3'd2;
+        sel_ch4 = 3'd3;
+        sel_trig = 3'd4;
+        view_ch_sel = 3'd0;
+
+        flash_ch_sel = 2'd0;
+        flash_write_req = 1'b0;
+        flash_read_req = 1'b0;
+
+        ui_page = PAGE_MAIN;
+        ui_cursor = 4'd0;
+        ui_curr_edit_mode = 1'b0;
+        ui_curr_edit_value = 4'd0;
+        ui_active_src_sel = 3'd0;
+    end
+
 
     // 函数：页面最大光标
     function [3:0] page_max_cursor;
