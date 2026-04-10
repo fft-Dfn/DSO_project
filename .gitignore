@@ -1,0 +1,11 @@
+old_version
+outflow
+work_pnr
+work_pt
+work_syn
+.lock
+ip/**
+!ip/
+!ip/*/
+!ip/*/settings.json
+DSO_project.peri.xml

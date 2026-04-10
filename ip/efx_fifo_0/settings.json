@@ -1,0 +1,57 @@
+{
+    "args": [
+        "-o",
+        "efx_fifo_0",
+        "--base_path",
+        "D:\\Document\\Code_field_vscode\\FPGA_Verilog\\efinity\\DSO_project\\ip",
+        "--vlnv",
+        {
+            "vendor": "efinixinc.com",
+            "library": "memory",
+            "name": "efx_fifo_top",
+            "version": "8.1"
+        }
+    ],
+    "conf": {
+        "SYNC_CLK": "0",
+        "SYNC_STAGE": "2",
+        "DEPTH_2": "9",
+        "DATA_WIDTH": "16",
+        "MODE": "\"STANDARD\"",
+        "OUTPUT_REG": "0",
+        "PROG_FULL_ASSERT": "510",
+        "PROGRAMMABLE_FULL": "\"STATIC_SINGLE\"",
+        "PFN_INTERNAL": "3",
+        "PEA_INTERNAL": "0",
+        "PEN_INTERNAL": "0",
+        "PROGRAMMABLE_EMPTY": "\"NONE\"",
+        "OPTIONAL_FLAGS": "0",
+        "PIPELINE_REG": "1",
+        "ASYM_WIDTH_RATIO": "5",
+        "BYPASS_RESET_SYNC": "0",
+        "ENDIANESS": "0",
+        "RAM_STYLE": "\"block_ram\"",
+        "OVERFLOW_PROTECT": "1",
+        "UNDERFLOW_PROTECT": "1"
+    },
+    "output": {
+        "external_source_source": [
+            "efx_fifo_0\\efx_fifo_0_define.svh",
+            "efx_fifo_0\\efx_fifo_0_tmpl.vhd",
+            "efx_fifo_0\\efx_fifo_0.sv",
+            "efx_fifo_0\\efx_fifo_0_tmpl.sv"
+        ],
+        "external_example_example": [
+            "efx_fifo_0\\T20F256_devkit\\fifo_demo_top.v",
+            "efx_fifo_0\\T20F256_devkit\\fifo_demo_T20.sdc",
+            "efx_fifo_0\\T20F256_devkit\\efx_symmetric_width_fifo_top.sv",
+            "efx_fifo_0\\T20F256_devkit\\efx_fifo_0.sv",
+            "efx_fifo_0\\T20F256_devkit\\efx_fifo_0_define.svh",
+            "efx_fifo_0\\T20F256_devkit\\fifo_demo.peri.xml",
+            "efx_fifo_0\\T20F256_devkit\\fifo_demo.xml"
+        ]
+    },
+    "ooc_synthesis": {},
+    "sw_version": "2025.2.288.3.8",
+    "generated_date": "2026-04-09T05:06:30.746830+00:00"
+}
