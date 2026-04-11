@@ -1,3 +1,9 @@
+// -----------------------------------------------------------------------------
+// vga_timing
+// -----------------------------------------------------------------------------
+// Purpose:
+//   Generates VGA sync/de/pixel coordinates for a fixed timing profile.
+// -----------------------------------------------------------------------------
 module vga_timing #(
     parameter H_ACTIVE = 640,
     parameter H_FP     = 16,
@@ -14,14 +20,14 @@ module vga_timing #(
 
     output reg         hsync,
     output reg         vsync,
-    output reg         de,          // display enable
+    output reg         de,          // display-enable (active video region)
     output reg [10:0]  pix_x,
     output reg [9:0]   pix_y,
-    output reg         frame_start  // 每帧开始脉冲
+    output reg         frame_start  // one-cycle pulse at the start of each frame
 );
 
-    localparam H_TOTAL = H_ACTIVE + H_FP + H_SYNC + H_BP;//800
-    localparam V_TOTAL = V_ACTIVE + V_FP + V_SYNC + V_BP;//525
+    localparam H_TOTAL = H_ACTIVE + H_FP + H_SYNC + H_BP; // 800 for 640x480@60
+    localparam V_TOTAL = V_ACTIVE + V_FP + V_SYNC + V_BP; // 525 for 640x480@60
 
     reg [10:0] h_cnt;
     reg [9:0]  v_cnt;
@@ -51,7 +57,7 @@ module vga_timing #(
                 h_cnt <= h_cnt + 11'd1;
             end
 
-            // VGA负极性同步
+            // Negative-polarity sync pulses (standard VGA for this mode).
             hsync <= ~((h_cnt >= H_ACTIVE + H_FP) &&
                        (h_cnt <  H_ACTIVE + H_FP + H_SYNC));
 
@@ -62,7 +68,8 @@ module vga_timing #(
 
             if ((h_cnt < H_ACTIVE) && (v_cnt < V_ACTIVE)) begin
                 pix_x <= h_cnt;
-                pix_y <= v_cnt;//比v_cnt慢一个周期，跟de,vsync同步
+                // pix_x/pix_y are aligned with de in this clocked pipeline.
+                pix_y <= v_cnt;
             end else begin
                 pix_x <= 11'd0;
                 pix_y <= 10'd0;

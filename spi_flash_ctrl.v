@@ -1,3 +1,17 @@
+// -----------------------------------------------------------------------------
+// spi_flash_ctrl
+// -----------------------------------------------------------------------------
+// Purpose:
+//   SPI flash page program/read controller for frame storage.
+//   Implements W25Q-style command sequence in a single FSM.
+//
+// Key Variables (English):
+//   - state: top-level transaction FSM.
+//   - cur_addr: current flash byte address.
+//   - byte_cnt: frame byte progress counter.
+//   - page_byte_cnt: page-local byte counter (0..255).
+//   - status_reg1: polled flash status register value.
+// -----------------------------------------------------------------------------
 module spi_flash_ctrl #(
     parameter integer ADDR_DEPTH      = 10,
     parameter integer DATA_DEPTH      = 8,
@@ -6,7 +20,7 @@ module spi_flash_ctrl #(
     input  wire                    clk_25m,
     input  wire                    rst_n,
 
-    // 用户请求
+    // User request interface.
     input  wire                    flash_write_req,
     output reg                     in_flash_temp_buffer_req,
 
@@ -18,7 +32,7 @@ module spi_flash_ctrl #(
 
     output reg  [2:0]              flash_status,
 
-    // SPI 物理接口
+    // SPI physical pins.
     output reg                     flash_cs_n,
     output reg                     flash_sck,
     output reg                     flash_mosi,
@@ -35,7 +49,7 @@ module spi_flash_ctrl #(
     localparam [7:0] CMD_PP    = 8'h02; // Page Program
 
   
-    // flash_status 定义
+    // flash_status encoding.
     // 000: idle
     // 001: write flow
     // 010: read flow
@@ -50,11 +64,11 @@ module spi_flash_ctrl #(
     localparam [2:0] ST_DONE_S   = 3'b100;
     localparam [2:0] ST_ERR_S    = 3'b111;
 
-    // 顶层状态机
+    // Top-level FSM states.
     localparam [5:0]
         S_IDLE                 = 6'd0,
 
-        // 写流程
+        // Write flow.
         S_WR_BUF_REQ           = 6'd1,
         S_WR_BUF_WAIT          = 6'd2,
         S_WR_WREN_LOAD         = 6'd3,
@@ -76,7 +90,7 @@ module spi_flash_ctrl #(
         S_WR_NEXT_PAGE         = 6'd17,
         S_WR_DONE              = 6'd18,
 
-        // 读流程
+        // Read flow.
         S_RD_BUF_REQ           = 6'd19,
         S_RD_CMD_LOAD          = 6'd20,
         S_RD_SHIFT_CMD         = 6'd21,
@@ -90,29 +104,29 @@ module spi_flash_ctrl #(
     reg [5:0] state;
 
     // SPI bit engine (Mode 0: CPOL=0, CPHA=0)
-    // 约定：
-    // 1) state切到某个 SHIFT 状态时，先把 tx_byte 准备好
-    // 2) bit_cnt 从 7 递减到 0
-    // 3) 每个系统拍翻转一次 flash_sck
-    //    - sck=0 -> 输出 MOSI
-    //    - sck=1 -> 采样 MISO, 并在最后一位后退出
+    // Bit-engine convention:
+    // 1) On entering a SHIFT state, tx_byte is preloaded.
+    // 2) bit_cnt decrements 7 -> 0.
+    // 3) flash_sck toggles every system cycle:
+    //    - sck=0: drive MOSI
+    //    - sck=1: sample MISO and exit when last bit completes
     reg [7:0] tx_byte;
     reg [7:0] rx_byte;
     reg [2:0] bit_cnt;
 
     reg [23:0] cur_addr;
     reg [15:0] byte_cnt;
-    reg [8:0]  page_byte_cnt;   // 最多计 256
+    reg [8:0]  page_byte_cnt;   // counts up to 256 bytes per page
     reg [7:0]  status_reg1;
 
     reg [7:0]  wr_data_latch;
     reg [7:0]  rd_data_latch;
 
-    // 读写页内/整帧控制
+    // Page/frame boundary helpers.
     wire frame_last_byte = (byte_cnt == FRAME_BYTES-1);
     wire page_last_byte  = (page_byte_cnt == 9'd255);
 
-    // SPI shift 公共过程通过状态机直接写，不额外拆子模块
+    // Shared SPI shift helper task (kept in this module, no submodule split).
     task spi_shift_start;
         input [7:0] din;
         begin
@@ -123,7 +137,7 @@ module spi_flash_ctrl #(
         end
     endtask
 
-    // 主状态机
+    // Main transaction FSM.
     always @(posedge clk_25m or negedge rst_n) begin
         if (!rst_n) begin
             state                    <= S_IDLE;
@@ -149,7 +163,7 @@ module spi_flash_ctrl #(
             wr_data_latch            <= 8'h00;
             rd_data_latch            <= 8'h00;
         end else begin
-            // 默认单拍信号拉低
+            // Default one-cycle pulse outputs low.
             in_flash_temp_buffer_req  <= 1'b0;
             out_flash_temp_buffer_req <= 1'b0;
 
@@ -174,7 +188,7 @@ module spi_flash_ctrl #(
                     end
                 end
 
-                // 写流程：先向 temp_buffer_in 发读请求
+                // Write flow: first request one byte from temp input buffer.
                 S_WR_BUF_REQ: begin
                     in_flash_temp_buffer_req <= 1'b1;
                     byte_cnt                 <= 16'd0;
@@ -183,7 +197,7 @@ module spi_flash_ctrl #(
                     state                    <= S_WR_BUF_WAIT;
                 end
 
-                // 给 temp_buffer 一个拍子开始吐数据
+                // Give temp buffer one cycle to present input data.
                 S_WR_BUF_WAIT: begin
                     state <= S_WR_WREN_LOAD;
                 end
@@ -215,7 +229,7 @@ module spi_flash_ctrl #(
                     state      <= S_WR_PP_LOAD;
                 end
 
-                // -Page Program 命令 + 24位地址
+                // Page Program command + 24-bit address.
                 S_WR_PP_LOAD: begin
                     flash_cs_n      <= 1'b0;
                     page_byte_cnt   <= 9'd0;
@@ -284,7 +298,7 @@ module spi_flash_ctrl #(
                     end
                 end
 
-                // 连续写整页，最多256B
+                // Stream-write one full page (up to 256 bytes).
                 S_WR_PP_SHIFT_DATA: begin
                     if (flash_sck == 1'b0) begin
                         flash_mosi <= tx_byte[bit_cnt];
@@ -314,7 +328,7 @@ module spi_flash_ctrl #(
                     state       <= S_WR_POLL_LOAD;
                 end
 
-                //轮询 BUSY 位
+                // Poll BUSY bit until write completes.
                 S_WR_POLL_LOAD: begin
                     flash_cs_n <= 1'b0;
                     spi_shift_start(CMD_RDSR1);
@@ -380,7 +394,7 @@ module spi_flash_ctrl #(
                     state <= S_IDLE;
                 end
 
-                // 读流程：先通知 temp_buffer_out 准备接收
+                // Read flow: notify temp output buffer before streaming data.
                 S_RD_BUF_REQ: begin
                     out_flash_temp_buffer_req <= 1'b1;
                     cur_addr                  <= FLASH_BASE_ADDR;
@@ -454,7 +468,7 @@ module spi_flash_ctrl #(
                     end
                 end
 
-                // 连续读取整帧
+                // Stream-read a full frame.
                 S_RD_SHIFT_DATA: begin
                     if (flash_sck == 1'b0) begin
                         flash_mosi <= 1'b0;
