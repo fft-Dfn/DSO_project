@@ -1,26 +1,33 @@
+// -----------------------------------------------------------------------------
+// key_debouncer
+// -----------------------------------------------------------------------------
+// Purpose:
+//   Debounce active-low mechanical keys.
+//   Uses 2-FF synchronizer + stable-time counter filter.
+// -----------------------------------------------------------------------------
 module key_debouncer #(
     parameter KEY_WIDTH = 5,
-    // 50MHz 时钟下，20ms 的计数值为 1,000,000
+    // At 50 MHz, 20 ms equals 1,000,000 cycles.
     parameter WAIT_TIME = 20'd1_000_000 
 )(
     input  wire                 clk_50m,
     
-    // 原始机械按键输入
+    // Raw asynchronous key inputs.
     input  wire [KEY_WIDTH-1:0] key_raw,
     
-    // 消抖后的干净输出
+    // Debounced, synchronized key outputs.
     output reg  [KEY_WIDTH-1:0] key_clean
 );
-    // 上电初始化 (Power-on Initialization)
-    // 由于复位信号本身在此处被消抖，模块内部所有寄存器必须显式赋初值
-    // 按键通常为上拉电阻，初始状态应为全 1 (高电平)
+    // Power-on initialization:
+    // The reset key itself is debounced in this module, so all internal registers
+    // should have explicit init values. Pull-up keys are idle-high.
 
     initial begin
         key_clean = {KEY_WIDTH{1'b1}};
     end
 
 
-    // 两级触发器同步 (消除亚稳态)
+    // Two-stage synchronizer to reduce metastability risk.
     reg [KEY_WIDTH-1:0] key_sync_0 = {KEY_WIDTH{1'b1}};
     reg [KEY_WIDTH-1:0] key_sync_1 = {KEY_WIDTH{1'b1}};
 
@@ -29,23 +36,23 @@ module key_debouncer #(
         key_sync_1 <= key_sync_0;
     end
 
-    // 3. 状态翻转检测与延时计数
+    // State-change detection and stable-time counting.
     reg [19:0] cnt = 20'd0;
     
-    // 当同步后的输入与当前稳定输出不一致时，说明按键正在动作或正在抖动
+    // Input differs from stable output while key is moving/bouncing.
     wire state_changed = (key_sync_1 != key_clean);
 
     always @(posedge clk_50m) begin
         if (state_changed) begin
-            // 状态发生变化，计数器开始累加
+            // Keep counting while candidate state remains different.
             cnt <= cnt + 1'b1;
             if (cnt == WAIT_TIME) begin
-                // 维持了 20ms 未再发生变化，确认状态稳定，更新输出
+                // Stable for WAIT_TIME: accept new debounced state.
                 key_clean <= key_sync_1;
                 cnt <= 20'd0;
             end
         end else begin
-            // 一旦在 20ms 内又发生翻转（抖动），计数器立刻清零重新计算
+            // Bounce or returned state: clear counter and restart.
             cnt <= 20'd0;
         end
     end

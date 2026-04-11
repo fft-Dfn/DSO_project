@@ -1,3 +1,21 @@
+// -----------------------------------------------------------------------------
+// hmi_controller
+// -----------------------------------------------------------------------------
+// Purpose:
+//   Human-machine interface state machine.
+//   Converts key pulses into:
+//   - DDS source configuration
+//   - Trigger/sampling configuration
+//   - Display source routing
+//   - Flash save/load requests
+//
+// Key Variables (English):
+//   - curr_page/curr_cursor: current UI navigation position.
+//   - curr_edit_mode: 1 while editing current item value.
+//   - active_src_sel: currently selected DDS source (A..E).
+//   - freq_idx/type_idx/phase_idx: per-source DDS config indices.
+//   - trig_*_idx, sample_div_idx: trigger and sampling config indices.
+// -----------------------------------------------------------------------------
 module hmi_controller (
     input  wire        clk_50m,
     input  wire        rst_n,
@@ -7,8 +25,7 @@ module hmi_controller (
     input  wire        key_enter_p,
     input  wire        key_back_p,
 
-  
-    // DDS 
+    // DDS configuration outputs.
     output reg  [31:0] dds_freq_a,
     output reg  [31:0] dds_freq_b,
     output reg  [31:0] dds_freq_c,
@@ -27,11 +44,11 @@ module hmi_controller (
     output reg  [7:0]  dds_phase_d,
     output reg  [7:0]  dds_phase_e,
 
-    // 触发 
+    // Trigger/sampling outputs.
     output reg         trig_mode,      // 0: normal, 1: auto
     output reg         trig_edge,      // 0: rise,   1: fall
     output reg  [7:0]  trig_level,     
-    output reg  [31:0] sample_div,     // 采样率分别是50M，10M，1M，100k
+    output reg  [31:0] sample_div,     // sampling divider: 1/5/50/500 -> 50M/10M/1M/0.1M
 
     output reg  [2:0]  sel_ch1,
     output reg  [2:0]  sel_ch2,
@@ -39,24 +56,23 @@ module hmi_controller (
     output reg  [2:0]  sel_ch4,
     output reg  [2:0]  sel_trig,
 
-   //Flash
+    // Flash transaction request interface.
     output reg  [1:0]  flash_ch_sel,   // 0~3 => ch1~ch4
     output reg         flash_write_req,
     output reg         flash_read_req,
 
-   
-    // VGA
+    // UI state outputs for display layer.
    
     output reg  [3:0]  ui_page,
     output reg  [3:0]  ui_cursor,
     output reg         ui_curr_edit_mode,
     output reg  [3:0]  ui_curr_edit_value,
     output reg  [2:0]  ui_active_src_sel,
-    output reg  [2:0]  view_ch_sel    // 0~4 => ch1~ch4 + flash
+    output reg  [2:0]  view_ch_sel    // 0..4 => ch1..ch4 + flash
 );
 
     // =========================================================
-    // 页面定义
+    // UI page definitions
     // =========================================================
     localparam PAGE_MAIN    = 4'd0;
     localparam PAGE_SRC     = 4'd1;
@@ -64,25 +80,25 @@ module hmi_controller (
     localparam PAGE_TRIG    = 4'd3;
     localparam PAGE_DISP    = 4'd4;
 
-    // 主页面 5 项
+    // Main page items (5 entries).
     localparam MAIN_SIG_SRC = 4'd0;
     localparam MAIN_TRIG    = 4'd1;
     localparam MAIN_DISP    = 4'd2;
     localparam MAIN_STORE   = 4'd3;
     localparam MAIN_DISP_STORE = 4'd4;
 
-    // src-cfg 页面 3 项
+    // Source-config page items (3 entries).
     localparam SRC_CFG_FREQ  = 4'd0;
     localparam SRC_CFG_TYPE  = 4'd1;
     localparam SRC_CFG_PHASE = 4'd2;
 
-    // trig 页面 4 项
+    // Trigger page items (4 entries).
     localparam TRIG_MODE_ITEM  = 4'd0;
     localparam TRIG_EDGE_ITEM  = 4'd1;
     localparam TRIG_LEVEL_ITEM = 4'd2;
     localparam TRIG_SAMP_ITEM  = 4'd3;
 
-    // disp 页面 7 项
+    // Display page items (7 entries).
     localparam DISP_CH1_IN    = 4'd0;
     localparam DISP_CH2_IN    = 4'd1;
     localparam DISP_CH3_IN    = 4'd2;
@@ -91,8 +107,7 @@ module hmi_controller (
     localparam DISP_VIEW_SEL  = 4'd5;
     localparam DISP_STORE_SEL = 4'd6;
 
-   
-    // 内部状态
+    // Internal UI state registers.
 
     reg [3:0] curr_page;
     reg [3:0] curr_cursor;
@@ -100,12 +115,12 @@ module hmi_controller (
     reg [3:0] curr_edit_value;
     reg [2:0] active_src_sel;
 
-    // 源配置索引（A~E）
+    // Per-source configuration indices (A..E).
     reg [1:0] freq_idx [0:4];   // 0:10k 1:20k 2:30k 3:40k
     reg [1:0] type_idx [0:4];   // 0:sine 1:square 2:tri 3:saw
     reg [1:0] phase_idx[0:4];   // 0:0 1:90 2:180 3:270
 
-    // 触发/采样配置索引
+    // Trigger/sampling configuration indices.
     reg [2:0] trig_mode_idx;    // 0 normal 1 auto
     reg [2:0] trig_edge_idx;    // 0 rise 1 fall
     reg [2:0] trig_level_idx;   // 0~4
@@ -129,7 +144,7 @@ module hmi_controller (
 
         trig_mode_idx  = 3'd1;
         trig_edge_idx  = 3'd0;
-        trig_level_idx = 3'd1;
+        trig_level_idx = 3'd2;
         sample_div_idx = 3'd0;
 
         sel_ch1 = 3'd0;
@@ -151,7 +166,7 @@ module hmi_controller (
     end
 
 
-    // 函数：页面最大光标
+    // Function: max cursor index for each page.
     function [3:0] page_max_cursor;
         input [3:0] page;
         begin
@@ -167,7 +182,7 @@ module hmi_controller (
     endfunction
 
 
-    // 函数：当前项可编辑值上限
+    // Function: max editable value for current page/cursor.
 
     function [3:0] edit_max_value;
         input [3:0] page;
@@ -208,7 +223,7 @@ module hmi_controller (
         end
     endfunction
 
-    // 函数：读取当前正式值，进入编辑态时装载
+    // Function: read current committed value when entering edit mode.
     function [3:0] get_current_value;
         input [3:0] page;
         input [3:0] cursor;
@@ -252,7 +267,7 @@ module hmi_controller (
     endfunction
 
     // =========================================================
-    // 主状态机
+    // Main UI FSM.
     // =========================================================
     always @(posedge clk_50m or negedge rst_n) begin
         if (!rst_n) begin
@@ -278,13 +293,13 @@ module hmi_controller (
             freq_idx[3]  <= 2'd1; 
             type_idx[3]  <= 2'd3; 
             phase_idx[3] <= 2'd0; 
-            //默认e为触发信号
+            // Default trigger source is E.
             freq_idx[4]  <= 2'd0; //20kHz
-            type_idx[4]  <= 2'd1; //方波
+            type_idx[4]  <= 2'd1; // square wave
             phase_idx[4] <= 2'd0; // 0
 
-            trig_mode_idx  <= 3'd1;//自动触发模式
-            trig_edge_idx  <= 3'd0;//上电平触发
+            trig_mode_idx  <= 3'd1;// auto trigger mode
+            trig_edge_idx  <= 3'd0;// rising-edge trigger
             trig_level_idx <= 3'd1;// 
             sample_div_idx <= 3'd0;//50MHz
 
@@ -299,13 +314,13 @@ module hmi_controller (
             flash_write_req <= 1'b0;
             flash_read_req  <= 1'b0;
         end else begin
-            // 默认脉冲输出拉低
+            // Pulse-type request outputs default low.
             flash_write_req <= 1'b0;
             flash_read_req  <= 1'b0;
 
             if (!curr_edit_mode) begin
                 // -------------------------
-                // 导航态
+                // Navigation mode.
                 // -------------------------
                 if (key_up_p) begin
                     if (curr_cursor > 0)
@@ -385,7 +400,7 @@ module hmi_controller (
                     endcase
                 end
             end else begin
-                // 编辑态              
+                // Edit mode.
                 if (key_up_p) begin
                     if (curr_edit_value < edit_max_value(curr_page, curr_cursor))
                         curr_edit_value <= curr_edit_value + 1'b1;
@@ -393,7 +408,7 @@ module hmi_controller (
                     if (curr_edit_value > 0)
                         curr_edit_value <= curr_edit_value - 1'b1;
                 end else if (key_enter_p) begin
-                    // 提交修改
+                    // Commit edits.
                     case (curr_page)
                         PAGE_SRC_CFG: begin
                             case (curr_cursor)
@@ -427,7 +442,7 @@ module hmi_controller (
 
                     curr_edit_mode <= 1'b0;
                 end else if (key_back_p) begin
-                    // 取消编辑
+                    // Cancel edit.
                     curr_edit_mode <= 1'b0;
                 end
             end
@@ -435,8 +450,8 @@ module hmi_controller (
     end
 
   
-    // 参数映射：索引 -> 实际输出值
-   //f_out=freq_word/(2^32)*f_clk
+    // Parameter mapping: config index -> actual output value.
+    // f_out = freq_word / (2^32) * f_clk
     always @(*) begin
         case (freq_idx[0])
             2'd0: dds_freq_a = 32'd858993;//10kHz
@@ -469,14 +484,14 @@ module hmi_controller (
             default: dds_freq_e = 32'd3435973;//40kHz
         endcase
 
-        // 波形类型直接透传
+        // Wave type index is directly forwarded.
         dds_type_a = type_idx[0];
         dds_type_b = type_idx[1];
         dds_type_c = type_idx[2];
         dds_type_d = type_idx[3];
         dds_type_e = type_idx[4];
 
-        // 相位映射
+        // Phase index mapping.
         case (phase_idx[0])
             2'd0: dds_phase_a = 8'd0;
             2'd1: dds_phase_a = 8'd64;
@@ -508,7 +523,7 @@ module hmi_controller (
             default: dds_phase_e = 8'd192;
         endcase
 
-        // 触发参数映射
+        // Trigger parameter mapping.
         trig_mode = trig_mode_idx[0];
         trig_edge = trig_edge_idx[0];
 
@@ -529,7 +544,7 @@ module hmi_controller (
     end
 
    
-    // UI 状态导出
+    // Export UI state to display logic.
     always @(posedge clk_50m or negedge rst_n) begin
         if (!rst_n) begin
             ui_page           <= PAGE_MAIN;

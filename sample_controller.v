@@ -1,3 +1,21 @@
+// -----------------------------------------------------------------------------
+// sample_controller
+// -----------------------------------------------------------------------------
+// Purpose:
+//   Capture 4 selected channels into a circular RAM window with trigger support.
+//
+// Capture Flow:
+//   S_IDLE    -> wait for rearm
+//   S_PREFILL -> fill pre-trigger half window
+//   S_ARMED   -> wait trigger edge (or auto-timeout force trigger)
+//   S_POST    -> capture post-trigger half window, then pulse capture_done
+//
+// Key Signals (English):
+//   - sample_tick: decimated sampling strobe from sample_div.
+//   - edge_fired: configured trigger edge condition met.
+//   - force_req: auto-mode timeout fallback trigger request.
+//   - frame_start_addr: logical start of display window around trigger point.
+// -----------------------------------------------------------------------------
 module sample_controller #(
     parameter DATA_W       = 8,
     parameter ADDR_W       = 10,
@@ -155,9 +173,7 @@ module sample_controller #(
                 end
 
                 S_PREFILL: begin
-                    if (!rearm) begin
-                        state <= S_IDLE;
-                    end else if (tick_d1) begin
+                    if (tick_d1) begin
                         ram_we        <= 1'b1;
                         ram_waddr     <= wr_ptr;
                         ram_wdata_ch1 <= ch1_cur;
@@ -177,47 +193,41 @@ module sample_controller #(
                 end
 
                 S_ARMED: begin
-                    if (!rearm) begin
-                        state <= S_IDLE;
-                    end else begin
-                        if (trig_mode == 1'b1) begin
-                            if (!force_req) begin
-                                if (auto_cnt < AUTO_TIMEOUT)
-                                    auto_cnt <= auto_cnt + 1'b1;
-                                else
-                                    force_req <= 1'b1;
-                            end
-                        end else begin
-                            auto_cnt <= 32'd0;
-                            force_req <= 1'b0;
+                    if (trig_mode == 1'b1) begin
+                        if (!force_req) begin
+                            if (auto_cnt < AUTO_TIMEOUT)
+                                auto_cnt <= auto_cnt + 1'b1;
+                            else
+                                force_req <= 1'b1;
                         end
+                    end else begin
+                        auto_cnt <= 32'd0;
+                        force_req <= 1'b0;
+                    end
 
-                        if (tick_d1) begin
-                            ram_we        <= 1'b1;
-                            ram_waddr     <= wr_ptr;
-                            ram_wdata_ch1 <= ch1_cur;
-                            ram_wdata_ch2 <= ch2_cur;
-                            ram_wdata_ch3 <= ch3_cur;
-                            ram_wdata_ch4 <= ch4_cur;
+                    if (tick_d1) begin
+                        ram_we        <= 1'b1;
+                        ram_waddr     <= wr_ptr;
+                        ram_wdata_ch1 <= ch1_cur;
+                        ram_wdata_ch2 <= ch2_cur;
+                        ram_wdata_ch3 <= ch3_cur;
+                        ram_wdata_ch4 <= ch4_cur;
 
-                            if (edge_fired || force_req) begin
-                                trig_addr <= wr_ptr;
-                                wr_ptr    <= wr_ptr + 1'b1;
-                                post_cnt  <= {ADDR_W{1'b0}};
-                                auto_cnt  <= 32'd0;
-                                force_req <= 1'b0;
-                                state     <= S_POST;
-                            end else begin
-                                wr_ptr <= wr_ptr + 1'b1;
-                            end
+                        if (edge_fired || force_req) begin
+                            trig_addr <= wr_ptr;
+                            wr_ptr    <= wr_ptr + 1'b1;
+                            post_cnt  <= {ADDR_W{1'b0}};
+                            auto_cnt  <= 32'd0;
+                            force_req <= 1'b0;
+                            state     <= S_POST;
+                        end else begin
+                            wr_ptr <= wr_ptr + 1'b1;
                         end
                     end
                 end
 
                 S_POST: begin
-                    if (!rearm) begin
-                        state <= S_IDLE;
-                    end else if (tick_d1) begin
+                    if (tick_d1) begin
                         ram_we        <= 1'b1;
                         ram_waddr     <= wr_ptr;
                         ram_wdata_ch1 <= ch1_cur;

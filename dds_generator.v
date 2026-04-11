@@ -1,7 +1,19 @@
+// -----------------------------------------------------------------------------
+// dds_generator
+// -----------------------------------------------------------------------------
+// Purpose:
+//   Direct Digital Synthesis (DDS) source for sine/square/triangle/saw waveforms.
+//
+// Key Signals (English):
+//   - phase_acc: phase accumulator.
+//   - freq_word: phase step per clock, controls output frequency.
+//   - phase_offset: static phase shift.
+//   - curr_phase: LUT/trig phase index after truncation + offset.
+// -----------------------------------------------------------------------------
 module dds_generator #(
-    parameter integer PHASE_W  = 32,  // 累加器位宽 (N)，决定频率分辨率
-    parameter integer TABLE_AW = 8,   // 查找表地址位宽 (P)，决定存储深度
-    parameter integer DATA_W   = 8    // 输出数据位宽 (D)，决定垂直分辨率
+    parameter integer PHASE_W  = 32,  // accumulator width, defines frequency resolution
+    parameter integer TABLE_AW = 8,   // LUT address width, defines table depth
+    parameter integer DATA_W   = 8    // output width, defines amplitude resolution
 )(
     input  wire                  clk,
     input  wire                  rst_n,
@@ -13,21 +25,21 @@ module dds_generator #(
     output reg  [DATA_W-1:0]     wave_data
 );
 
-    // 截断起始位置
+    // Truncation start bit for phase-to-table mapping.
     localparam TRUNC_POS = PHASE_W - TABLE_AW;
 
-    // 1. 相位累加器
+    // 1) Phase accumulator.
     reg [PHASE_W-1:0] phase_acc;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) phase_acc <= {PHASE_W{1'b0}};
         else        phase_acc <= phase_acc + freq_word;
     end
 
-    // 2. 相位截断与偏移
+    // 2) Phase truncation + offset.
     wire [TABLE_AW-1:0] curr_phase;
     assign curr_phase = phase_acc[PHASE_W-1 : TRUNC_POS] + phase_offset;
 
-    // 3. 查表 
+    // 3) Sine LUT read.
     wire [DATA_W-1:0] sin_out;
     sine_lut #(
         .ADDR_W(TABLE_AW),
@@ -38,14 +50,14 @@ module dds_generator #(
         .data (sin_out)
     );
 
-    // 4. 其他波形逻辑 
+    // 4) Other waveform generation paths.
     wire [DATA_W-1:0] sqr_out = curr_phase[TABLE_AW-1] ? {8'b1100_0000} : {8'b0100_0000};
     wire [DATA_W-1:0] tri_out = curr_phase[TABLE_AW-1] ? 
                                 (~curr_phase[TABLE_AW-2:0] << (DATA_W - (TABLE_AW-1))) : 
                                 ( curr_phase[TABLE_AW-2:0] << (DATA_W - (TABLE_AW-1)));
     wire [DATA_W-1:0] saw_out = curr_phase << (DATA_W - TABLE_AW);
 
-    // 5. 输出选择
+    // 5) Waveform mux.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) wave_data <= {DATA_W{1'b0}};
         else begin
