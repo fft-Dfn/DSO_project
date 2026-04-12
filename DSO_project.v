@@ -35,7 +35,12 @@ module DSO_project (
     output wire [5:0]  vga_g,
     output wire [4:0]  vga_b,
     
-    output wire        led_0
+    // EEPROM I2C pins (Efinix split inout style).
+    input  wire                  sda_eeprom_IN,
+    output wire                  sda_eeprom_OUT,
+    output wire                  sda_eeprom_OE,
+    output wire                  scl_eeprom
+
  
    // output wire        flash_cs_n,
     //output wire        flash_sck,
@@ -135,6 +140,12 @@ module DSO_project (
     
     wire        flash_write_req, flash_read_req;
     wire [1:0]  flash_ch_sel;
+    wire [51:0] persist_save_state;
+    wire        persist_save_req;
+    wire        persist_load_valid;
+    wire [51:0] persist_load_state;
+    wire        persist_busy;
+    wire        persist_error;
 
     wire [3:0]  ui_page, ui_cursor;
     wire [2:0]  view_ch_sel;
@@ -189,9 +200,31 @@ module DSO_project (
         .ui_curr_edit_mode  (ui_curr_edit_mode),
         .ui_curr_edit_value  (ui_curr_edit_value),
         .ui_active_src_sel   (ui_active_src_sel),
-        .view_ch_sel    (view_ch_sel)
+        .view_ch_sel    (view_ch_sel),
+
+        .persist_load_valid (persist_load_valid),
+        .persist_load_state (persist_load_state),
+        .persist_save_state (persist_save_state),
+        .persist_save_req   (persist_save_req)
     );
- 
+
+    // Automatic parameter persistence:
+    // - read once from EEPROM at power-up
+    // - write back after each parameter commit
+    at24c01c_param_persist u_at24c01c_param_persist (
+        .clk_50m        (clk_50m),
+        .rst_n          (rst_n_50),
+        .save_req       (persist_save_req),
+        .save_state     (persist_save_state),
+        .load_valid     (persist_load_valid),
+        .load_state     (persist_load_state),
+        .busy           (persist_busy),
+        .error          (persist_error),
+        .scl            (scl_eeprom),
+        .sda_in         (sda_eeprom_IN),
+        .sda_out        (sda_eeprom_OUT),
+        .sda_oe         (sda_eeprom_OE)
+    );
 
 
 
@@ -469,7 +502,6 @@ module DSO_project (
         dbg_status_base
     };
 
-   assign  led_0 = ~overflow;
    wire [15:0] rgb_565;
    assign vga_r     = rgb_565[15:11];
    assign vga_g     = rgb_565[10:5];
@@ -491,14 +523,18 @@ module DSO_project (
 		      .rdata_ch2	(vga_rdata_ch2),
 		      .rdata_ch3	(vga_rdata_ch3),
 		      .rdata_ch4	(vga_rdata_ch4),
-		      .dbg_status       (dbg_status)
-
-		      //.ui_page		(ui_page),
-		      //.ui_cursor	(ui_cursor),
-		      //.ui_curr_edit_mode(ui_curr_edit_mode),
-		      //.ui_curr_edit_valu(ui_curr_edit_valu),
-		      //.ui_active_src_sel(ui_active_src_sel),
-		      //.view_ch_sel	(view_ch_sel)
+		      .dbg_status       (dbg_status),
+		      .ui_page          (ui_page),
+		      .ui_cursor        (ui_cursor),
+		      .ui_curr_edit_mode(ui_curr_edit_mode),
+		      .ui_curr_edit_value(ui_curr_edit_value),
+		      .ui_active_src_sel(ui_active_src_sel),
+		      .view_ch_sel      (view_ch_sel),
+		      .trig_mode        (trig_mode),
+		      .trig_edge        (trig_edge),
+		      .trig_level       (trig_level),
+		      .sample_div       (sample_div),
+		      .sel_trig         (sel_trig)
           );
    
 endmodule

@@ -68,7 +68,13 @@ module hmi_controller (
     output reg         ui_curr_edit_mode,
     output reg  [3:0]  ui_curr_edit_value,
     output reg  [2:0]  ui_active_src_sel,
-    output reg  [2:0]  view_ch_sel    // 0..4 => ch1..ch4 + flash
+    output reg  [2:0]  view_ch_sel,   // 0..4 => ch1..ch4 + flash
+
+    // Persistent parameter interface (auto save/load).
+    input  wire        persist_load_valid,
+    input  wire [51:0] persist_load_state,
+    output wire [51:0] persist_save_state,
+    output reg         persist_save_req
 );
 
     // =========================================================
@@ -85,7 +91,7 @@ module hmi_controller (
     localparam MAIN_TRIG    = 4'd1;
     localparam MAIN_DISP    = 4'd2;
     localparam MAIN_STORE   = 4'd3;
-    localparam MAIN_DISP_STORE = 4'd4;
+    localparam MAIN_LOAD    = 4'd4;
 
     // Source-config page items (3 entries).
     localparam SRC_CFG_FREQ  = 4'd0;
@@ -125,45 +131,6 @@ module hmi_controller (
     reg [2:0] trig_edge_idx;    // 0 rise 1 fall
     reg [2:0] trig_level_idx;   // 0~4
     reg [2:0] sample_div_idx;   // 0~3
-
-    integer i;
-
-    // Power-up defaults: keep behavior deterministic even if external reset is not pressed.
-    initial begin
-        curr_page      = PAGE_MAIN;
-        curr_cursor    = 4'd0;
-        curr_edit_mode = 1'b0;
-        curr_edit_value = 4'd0;
-        active_src_sel = 3'd0;
-
-        freq_idx[0]  = 2'd1; type_idx[0]  = 2'd0; phase_idx[0] = 2'd0;
-        freq_idx[1]  = 2'd1; type_idx[1]  = 2'd1; phase_idx[1] = 2'd0;
-        freq_idx[2]  = 2'd1; type_idx[2]  = 2'd2; phase_idx[2] = 2'd0;
-        freq_idx[3]  = 2'd1; type_idx[3]  = 2'd3; phase_idx[3] = 2'd0;
-        freq_idx[4]  = 2'd1; type_idx[4]  = 2'd1; phase_idx[4] = 2'd0;
-
-        trig_mode_idx  = 3'd1;
-        trig_edge_idx  = 3'd0;
-        trig_level_idx = 3'd2;
-        sample_div_idx = 3'd2; // ~4.17MHz default, one window is about 3 cycles at 20kHz
-
-        sel_ch1 = 3'd0;
-        sel_ch2 = 3'd1;
-        sel_ch3 = 3'd2;
-        sel_ch4 = 3'd3;
-        sel_trig = 3'd4;
-        view_ch_sel = 3'd0;
-
-        flash_ch_sel = 2'd0;
-        flash_write_req = 1'b0;
-        flash_read_req = 1'b0;
-
-        ui_page = PAGE_MAIN;
-        ui_cursor = 4'd0;
-        ui_curr_edit_mode = 1'b0;
-        ui_curr_edit_value = 4'd0;
-        ui_active_src_sel = 3'd0;
-    end
 
 
     // Function: max cursor index for each page.
@@ -266,6 +233,224 @@ module hmi_controller (
         end
     endfunction
 
+    // Function: map frequency index to DDS frequency word.
+    function [31:0] freq_word_from_idx;
+        input [1:0] idx;
+        begin
+            case (idx)
+                2'd0: freq_word_from_idx = 32'd858993;  // 10kHz
+                2'd1: freq_word_from_idx = 32'd1717987; // 20kHz
+                2'd2: freq_word_from_idx = 32'd2576980; // 30kHz
+                default: freq_word_from_idx = 32'd3435973; // 40kHz
+            endcase
+        end
+    endfunction
+
+    // Function: map phase index to phase offset.
+    function [7:0] phase_from_idx;
+        input [1:0] idx;
+        begin
+            case (idx)
+                2'd0: phase_from_idx = 8'd0;
+                2'd1: phase_from_idx = 8'd64;
+                2'd2: phase_from_idx = 8'd128;
+                default: phase_from_idx = 8'd192;
+            endcase
+        end
+    endfunction
+
+    // Function: map trigger level index to threshold.
+    function [7:0] trig_level_from_idx;
+        input [2:0] idx;
+        begin
+            case (idx)
+                3'd0: trig_level_from_idx = 8'd25;
+                3'd1: trig_level_from_idx = 8'd75;
+                3'd2: trig_level_from_idx = 8'd128;
+                3'd3: trig_level_from_idx = 8'd180;
+                default: trig_level_from_idx = 8'd75;
+            endcase
+        end
+    endfunction
+
+    // Function: map sample divider index to actual divider.
+    function [31:0] sample_div_from_idx;
+        input [2:0] idx;
+        begin
+            case (idx[1:0])
+                2'd0: sample_div_from_idx = 32'd1;   // 50MHz
+                2'd1: sample_div_from_idx = 32'd5;   // 10MHz
+                2'd2: sample_div_from_idx = 32'd12;  // ~4.17MHz
+                default: sample_div_from_idx = 32'd50; // 1MHz
+            endcase
+        end
+    endfunction
+
+    // Packed persistent state (52 bits total, all fields are index form):
+    // [ 9: 0] freq_idx[0..4]   (2 bits each)
+    // [19:10] type_idx[0..4]   (2 bits each)
+    // [29:20] phase_idx[0..4]  (2 bits each)
+    // [30]    trig_mode_idx[0]
+    // [31]    trig_edge_idx[0]
+    // [34:32] trig_level_idx
+    // [36:35] sample_div_idx[1:0]
+    // [39:37] sel_ch1
+    // [42:40] sel_ch2
+    // [45:43] sel_ch3
+    // [48:46] sel_ch4
+    // [51:49] sel_trig
+    assign persist_save_state = {
+        sel_trig[2:0],
+        sel_ch4[2:0],
+        sel_ch3[2:0],
+        sel_ch2[2:0],
+        sel_ch1[2:0],
+        sample_div_idx[1:0],
+        trig_level_idx[2:0],
+        trig_edge_idx[0],
+        trig_mode_idx[0],
+        phase_idx[4], phase_idx[3], phase_idx[2], phase_idx[1], phase_idx[0],
+        type_idx[4],  type_idx[3],  type_idx[2],  type_idx[1],  type_idx[0],
+        freq_idx[4],  freq_idx[3],  freq_idx[2],  freq_idx[1],  freq_idx[0]
+    };
+
+    // Handle key actions when UI is in navigation mode (not editing).
+    task handle_nav_mode;
+        begin
+            if (key_up_p) begin
+                if (curr_cursor > 0)
+                    curr_cursor <= curr_cursor - 1'b1;
+            end else if (key_down_p) begin
+                if (curr_cursor < page_max_cursor(curr_page))
+                    curr_cursor <= curr_cursor + 1'b1;
+            end else if (key_enter_p) begin
+                case (curr_page)
+                    PAGE_MAIN: begin
+                        case (curr_cursor)
+                            MAIN_SIG_SRC: begin
+                                curr_page   <= PAGE_SRC;
+                                curr_cursor <= 4'd0;
+                            end
+                            MAIN_TRIG: begin
+                                curr_page   <= PAGE_TRIG;
+                                curr_cursor <= 4'd0;
+                            end
+                            MAIN_DISP: begin
+                                curr_page   <= PAGE_DISP;
+                                curr_cursor <= 4'd0;
+                            end
+                            MAIN_STORE: begin
+                                flash_write_req <= 1'b1;
+                            end
+                            MAIN_LOAD: begin
+                                flash_read_req <= 1'b1;
+                            end
+                        endcase
+                    end
+
+                    PAGE_SRC: begin
+                        active_src_sel <= curr_cursor[2:0];
+                        curr_page      <= PAGE_SRC_CFG;
+                        curr_cursor    <= 4'd0;
+                    end
+
+                    PAGE_SRC_CFG,
+                    PAGE_TRIG,
+                    PAGE_DISP: begin
+                        curr_edit_value <= get_current_value(curr_page, curr_cursor, active_src_sel);
+                        curr_edit_mode  <= 1'b1;
+                    end
+
+                    default: begin
+                        curr_page   <= PAGE_MAIN;
+                        curr_cursor <= 4'd0;
+                    end
+                endcase
+            end else if (key_back_p) begin
+                case (curr_page)
+                    PAGE_MAIN: begin
+                        curr_page   <= PAGE_MAIN;
+                        curr_cursor <= 4'd0;
+                    end
+                    PAGE_SRC: begin
+                        curr_page   <= PAGE_MAIN;
+                        curr_cursor <= MAIN_SIG_SRC;
+                    end
+                    PAGE_SRC_CFG: begin
+                        curr_page   <= PAGE_SRC;
+                        curr_cursor <= {1'b0, active_src_sel};
+                    end
+                    PAGE_TRIG: begin
+                        curr_page   <= PAGE_MAIN;
+                        curr_cursor <= MAIN_TRIG;
+                    end
+                    PAGE_DISP: begin
+                        curr_page   <= PAGE_MAIN;
+                        curr_cursor <= MAIN_DISP;
+                    end
+                    default: begin
+                        curr_page   <= PAGE_MAIN;
+                        curr_cursor <= 4'd0;
+                    end
+                endcase
+            end
+        end
+    endtask
+
+    // Handle key actions when UI is in edit mode.
+    task handle_edit_mode;
+        begin
+            if (key_up_p) begin
+                if (curr_edit_value > 0)
+                    curr_edit_value <= curr_edit_value - 1'b1;
+            end else if (key_down_p) begin
+                if (curr_edit_value < edit_max_value(curr_page, curr_cursor))
+                    curr_edit_value <= curr_edit_value + 1'b1;
+            end else if (key_enter_p) begin
+                // Commit edits.
+                case (curr_page)
+                    PAGE_SRC_CFG: begin
+                        case (curr_cursor)
+                            SRC_CFG_FREQ:  freq_idx[active_src_sel]  <= curr_edit_value[1:0];
+                            SRC_CFG_TYPE:  type_idx[active_src_sel]  <= curr_edit_value[1:0];
+                            SRC_CFG_PHASE: phase_idx[active_src_sel] <= curr_edit_value[1:0];
+                        endcase
+                        persist_save_req <= 1'b1;
+                    end
+
+                    PAGE_TRIG: begin
+                        case (curr_cursor)
+                            TRIG_MODE_ITEM:  trig_mode_idx  <= curr_edit_value[2:0];
+                            TRIG_EDGE_ITEM:  trig_edge_idx  <= curr_edit_value[2:0];
+                            TRIG_LEVEL_ITEM: trig_level_idx <= curr_edit_value[2:0];
+                            TRIG_SAMP_ITEM:  sample_div_idx <= curr_edit_value[2:0];
+                        endcase
+                        persist_save_req <= 1'b1;
+                    end
+
+                    PAGE_DISP: begin
+                        case (curr_cursor)
+                            DISP_CH1_IN:    sel_ch1      <= curr_edit_value[2:0];
+                            DISP_CH2_IN:    sel_ch2      <= curr_edit_value[2:0];
+                            DISP_CH3_IN:    sel_ch3      <= curr_edit_value[2:0];
+                            DISP_CH4_IN:    sel_ch4      <= curr_edit_value[2:0];
+                            DISP_TRIG_IN:   sel_trig     <= curr_edit_value[2:0];
+                            DISP_VIEW_SEL:  view_ch_sel  <= curr_edit_value[2:0];
+                            DISP_STORE_SEL: flash_ch_sel <= curr_edit_value[1:0];
+                        endcase
+                        if (curr_cursor <= DISP_TRIG_IN)
+                            persist_save_req <= 1'b1;
+                    end
+                endcase
+
+                curr_edit_mode <= 1'b0;
+            end else if (key_back_p) begin
+                // Cancel edit.
+                curr_edit_mode <= 1'b0;
+            end
+        end
+    endtask
+
     // =========================================================
     // Main UI FSM.
     // =========================================================
@@ -273,178 +458,93 @@ module hmi_controller (
         if (!rst_n) begin
             curr_page      <= PAGE_MAIN;
             curr_cursor    <= 4'd0;
-            curr_edit_mode      <= 1'b0;
-            curr_edit_value     <= 4'd0;
+            curr_edit_mode <= 1'b0;
+            curr_edit_value <= 4'd0;
             active_src_sel <= 3'd0;
 
-          
-            freq_idx[0]  <= 2'd1; //20kHz 
-            type_idx[0]  <= 2'd0; 
-            phase_idx[0] <= 2'd0; 
+            freq_idx[0]  <= 2'd1; //20kHz
+            type_idx[0]  <= 2'd0;
+            phase_idx[0] <= 2'd0;
 
-            freq_idx[1]  <= 2'd1; 
+            freq_idx[1]  <= 2'd1;
             type_idx[1]  <= 2'd1;
             phase_idx[1] <= 2'd0;
 
-            freq_idx[2]  <= 2'd1; 
-            type_idx[2]  <= 2'd2; 
-            phase_idx[2] <= 2'd0; 
+            freq_idx[2]  <= 2'd1;
+            type_idx[2]  <= 2'd2;
+            phase_idx[2] <= 2'd0;
 
-            freq_idx[3]  <= 2'd1; 
-            type_idx[3]  <= 2'd3; 
-            phase_idx[3] <= 2'd0; 
+            freq_idx[3]  <= 2'd1;
+            type_idx[3]  <= 2'd3;
+            phase_idx[3] <= 2'd0;
             // Default trigger source is E.
             freq_idx[4]  <= 2'd1; //20kHz
             type_idx[4]  <= 2'd1; // square wave
             phase_idx[4] <= 2'd0; // 0
 
-            trig_mode_idx  <= 3'd1;// auto trigger mode
-            trig_edge_idx  <= 3'd0;// rising-edge trigger
-            trig_level_idx <= 3'd2;// 128 mid-level trigger
-            sample_div_idx <= 3'd2;// ~4.17MHz, ~3 cycles/window at 20kHz
+            trig_mode_idx  <= 3'd1; // auto trigger mode
+            trig_edge_idx  <= 3'd0; // rising-edge trigger
+            trig_level_idx <= 3'd2; // 128 mid-level trigger
+            sample_div_idx <= 3'd2; // ~4.17MHz, ~3 cycles/window at 20kHz
 
-            sel_ch1        <= 3'd0; // A
-            sel_ch2        <= 3'd1; // B
-            sel_ch3        <= 3'd2; // C
-            sel_ch4        <= 3'd3; // D
-            sel_trig       <= 3'd4; // E
-            view_ch_sel    <= 3'd0; // ch1
+            sel_ch1      <= 3'd0; // A
+            sel_ch2      <= 3'd1; // B
+            sel_ch3      <= 3'd2; // C
+            sel_ch4      <= 3'd3; // D
+            sel_trig     <= 3'd4; // E
+            view_ch_sel  <= 3'd0; // ch1
 
-            flash_ch_sel   <= 2'd0; // ch1
+            flash_ch_sel    <= 2'd0; // ch1
             flash_write_req <= 1'b0;
             flash_read_req  <= 1'b0;
+            persist_save_req <= 1'b0;
         end else begin
             // Pulse-type request outputs default low.
             flash_write_req <= 1'b0;
             flash_read_req  <= 1'b0;
+            persist_save_req <= 1'b0;
 
-            if (!curr_edit_mode) begin
-                // -------------------------
-                // Navigation mode.
-                // -------------------------
-                if (key_up_p) begin
-                    if (curr_cursor > 0)
-                        curr_cursor <= curr_cursor - 1'b1;
-                end else if (key_down_p) begin
-                    if (curr_cursor < page_max_cursor(curr_page))
-                        curr_cursor <= curr_cursor + 1'b1;
-                end else if (key_enter_p) begin
-                    case (curr_page)
-                        PAGE_MAIN: begin
-                            case (curr_cursor)
-                                MAIN_SIG_SRC: begin
-                                    curr_page   <= PAGE_SRC;
-                                    curr_cursor <= 4'd0;
-                                end
-                                MAIN_TRIG: begin
-                                    curr_page   <= PAGE_TRIG;
-                                    curr_cursor <= 4'd0;
-                                end
-                                MAIN_DISP: begin
-                                    curr_page   <= PAGE_DISP;
-                                    curr_cursor <= 4'd0;
-                                end
-                                MAIN_STORE: begin
-                                    flash_write_req <= 1'b1;
-                                end
-                                MAIN_DISP_STORE:begin
-                                    flash_read_req <=1'b1;
-                                end
-                            endcase
-                        end
+            // Apply persisted configuration once it is loaded from EEPROM.
+            // Keep this higher priority than key handling in that cycle.
+            if (persist_load_valid) begin
+                freq_idx[0] <= persist_load_state[1:0];
+                freq_idx[1] <= persist_load_state[3:2];
+                freq_idx[2] <= persist_load_state[5:4];
+                freq_idx[3] <= persist_load_state[7:6];
+                freq_idx[4] <= persist_load_state[9:8];
 
-                        PAGE_SRC: begin
-                            active_src_sel <= curr_cursor[2:0];
-                            curr_page      <= PAGE_SRC_CFG;
-                            curr_cursor    <= 4'd0;
-                        end
+                type_idx[0] <= persist_load_state[11:10];
+                type_idx[1] <= persist_load_state[13:12];
+                type_idx[2] <= persist_load_state[15:14];
+                type_idx[3] <= persist_load_state[17:16];
+                type_idx[4] <= persist_load_state[19:18];
 
-                        PAGE_SRC_CFG,
-                        PAGE_TRIG,
-                        PAGE_DISP: begin
-                            curr_edit_value <= get_current_value(curr_page, curr_cursor, active_src_sel);
-                            curr_edit_mode  <= 1'b1;
-                        end
+                phase_idx[0] <= persist_load_state[21:20];
+                phase_idx[1] <= persist_load_state[23:22];
+                phase_idx[2] <= persist_load_state[25:24];
+                phase_idx[3] <= persist_load_state[27:26];
+                phase_idx[4] <= persist_load_state[29:28];
 
-                        default: begin
-                            curr_page   <= PAGE_MAIN;
-                            curr_cursor <= 4'd0;
-                        end
-                    endcase
-                end else if (key_back_p) begin
-                    case (curr_page)
-                        PAGE_MAIN: begin
-                            curr_page   <= PAGE_MAIN;
-                            curr_cursor <= 4'd0;
-                        end
-                        PAGE_SRC: begin
-                            curr_page   <= PAGE_MAIN;
-                            curr_cursor <= MAIN_SIG_SRC;
-                        end
-                        PAGE_SRC_CFG: begin
-                            curr_page   <= PAGE_SRC;
-                            curr_cursor <= {1'b0, active_src_sel};
-                        end
-                        PAGE_TRIG: begin
-                            curr_page   <= PAGE_MAIN;
-                            curr_cursor <= MAIN_TRIG;
-                        end
-                        PAGE_DISP: begin
-                            curr_page   <= PAGE_MAIN;
-                            curr_cursor <= MAIN_DISP;
-                        end
-                        default: begin
-                            curr_page   <= PAGE_MAIN;
-                            curr_cursor <= 4'd0;
-                        end
-                    endcase
-                end
+                trig_mode_idx <= {2'b00, persist_load_state[30]};
+                trig_edge_idx <= {2'b00, persist_load_state[31]};
+
+                if (persist_load_state[34:32] <= 3'd4)
+                    trig_level_idx <= persist_load_state[34:32];
+                else
+                    trig_level_idx <= 3'd2;
+
+                sample_div_idx <= {1'b0, persist_load_state[36:35]};
+
+                if (persist_load_state[39:37] <= 3'd4) sel_ch1 <= persist_load_state[39:37]; else sel_ch1 <= 3'd0;
+                if (persist_load_state[42:40] <= 3'd4) sel_ch2 <= persist_load_state[42:40]; else sel_ch2 <= 3'd1;
+                if (persist_load_state[45:43] <= 3'd4) sel_ch3 <= persist_load_state[45:43]; else sel_ch3 <= 3'd2;
+                if (persist_load_state[48:46] <= 3'd4) sel_ch4 <= persist_load_state[48:46]; else sel_ch4 <= 3'd3;
+                if (persist_load_state[51:49] <= 3'd4) sel_trig <= persist_load_state[51:49]; else sel_trig <= 3'd4;
             end else begin
-                // Edit mode.
-                if (key_up_p) begin
-                    if (curr_edit_value < edit_max_value(curr_page, curr_cursor))
-                        curr_edit_value <= curr_edit_value + 1'b1;
-                end else if (key_down_p) begin
-                    if (curr_edit_value > 0)
-                        curr_edit_value <= curr_edit_value - 1'b1;
-                end else if (key_enter_p) begin
-                    // Commit edits.
-                    case (curr_page)
-                        PAGE_SRC_CFG: begin
-                            case (curr_cursor)
-                                SRC_CFG_FREQ:  freq_idx[active_src_sel]  <= curr_edit_value[1:0];
-                                SRC_CFG_TYPE:  type_idx[active_src_sel]  <= curr_edit_value[1:0];
-                                SRC_CFG_PHASE: phase_idx[active_src_sel] <= curr_edit_value[1:0];
-                            endcase
-                        end
-
-                        PAGE_TRIG: begin
-                            case (curr_cursor)
-                                TRIG_MODE_ITEM:  trig_mode_idx  <= curr_edit_value[2:0];
-                                TRIG_EDGE_ITEM:  trig_edge_idx  <= curr_edit_value[2:0];
-                                TRIG_LEVEL_ITEM: trig_level_idx <= curr_edit_value[2:0];
-                                TRIG_SAMP_ITEM:  sample_div_idx <= curr_edit_value[2:0];
-                            endcase
-                        end
-
-                        PAGE_DISP: begin
-                            case (curr_cursor)
-                                DISP_CH1_IN:    sel_ch1      <= curr_edit_value[2:0];
-                                DISP_CH2_IN:    sel_ch2      <= curr_edit_value[2:0];
-                                DISP_CH3_IN:    sel_ch3      <= curr_edit_value[2:0];
-                                DISP_CH4_IN:    sel_ch4      <= curr_edit_value[2:0];
-                                DISP_TRIG_IN:   sel_trig     <= curr_edit_value[2:0];
-                                DISP_VIEW_SEL:  view_ch_sel  <= curr_edit_value[2:0];
-                                DISP_STORE_SEL: flash_ch_sel <= curr_edit_value[1:0];
-                            endcase
-                        end
-                    endcase
-
-                    curr_edit_mode <= 1'b0;
-                end else if (key_back_p) begin
-                    // Cancel edit.
-                    curr_edit_mode <= 1'b0;
-                end
+                if (!curr_edit_mode)
+                    handle_nav_mode;
+                else
+                    handle_edit_mode;
             end
         end
     end
@@ -453,36 +553,11 @@ module hmi_controller (
     // Parameter mapping: config index -> actual output value.
     // f_out = freq_word / (2^32) * f_clk
     always @(*) begin
-        case (freq_idx[0])
-            2'd0: dds_freq_a = 32'd858993;//10kHz
-            2'd1: dds_freq_a = 32'd1717987;//20kHz
-            2'd2: dds_freq_a = 32'd2576980;//30kHz
-            default: dds_freq_a = 32'd3435973;//40kHz
-        endcase
-        case (freq_idx[1])
-            2'd0: dds_freq_b = 32'd858993;//10kHz
-            2'd1: dds_freq_b = 32'd1717987;//20kHz
-            2'd2: dds_freq_b = 32'd2576980;//30kHz
-            default: dds_freq_b = 32'd3435973;//40kHz
-        endcase
-        case (freq_idx[2])
-            2'd0: dds_freq_c = 32'd858993;//10kHz
-            2'd1: dds_freq_c = 32'd1717987;//20kHz
-            2'd2: dds_freq_c = 32'd2576980;//30kHz
-            default: dds_freq_c = 32'd3435973;//40kHz
-        endcase
-        case (freq_idx[3])
-            2'd0: dds_freq_d = 32'd858993;//10kHz
-            2'd1: dds_freq_d = 32'd1717987;//20kHz
-            2'd2: dds_freq_d = 32'd2576980;//30kHz
-            default: dds_freq_d = 32'd3435973;//40kHz
-        endcase
-        case (freq_idx[4])
-            2'd0: dds_freq_e = 32'd858993;//10kHz
-            2'd1: dds_freq_e = 32'd1717987;//20kHz
-            2'd2: dds_freq_e = 32'd2576980;//30kHz
-            default: dds_freq_e = 32'd3435973;//40kHz
-        endcase
+        dds_freq_a = freq_word_from_idx(freq_idx[0]);
+        dds_freq_b = freq_word_from_idx(freq_idx[1]);
+        dds_freq_c = freq_word_from_idx(freq_idx[2]);
+        dds_freq_d = freq_word_from_idx(freq_idx[3]);
+        dds_freq_e = freq_word_from_idx(freq_idx[4]);
 
         // Wave type index is directly forwarded.
         dds_type_a = type_idx[0];
@@ -492,71 +567,35 @@ module hmi_controller (
         dds_type_e = type_idx[4];
 
         // Phase index mapping.
-        case (phase_idx[0])
-            2'd0: dds_phase_a = 8'd0;
-            2'd1: dds_phase_a = 8'd64;
-            2'd2: dds_phase_a = 8'd128;
-            default: dds_phase_a = 8'd192;
-        endcase
-        case (phase_idx[1])
-            2'd0: dds_phase_b = 8'd0;
-            2'd1: dds_phase_b = 8'd64;
-            2'd2: dds_phase_b = 8'd128;
-            default: dds_phase_b = 8'd192;
-        endcase
-        case (phase_idx[2])
-            2'd0: dds_phase_c = 8'd0;
-            2'd1: dds_phase_c = 8'd64;
-            2'd2: dds_phase_c = 8'd128;
-            default: dds_phase_c = 8'd192;
-        endcase
-        case (phase_idx[3])
-            2'd0: dds_phase_d = 8'd0;
-            2'd1: dds_phase_d = 8'd64;
-            2'd2: dds_phase_d = 8'd128;
-            default: dds_phase_d = 8'd192;
-        endcase
-        case (phase_idx[4])
-            2'd0: dds_phase_e = 8'd0;
-            2'd1: dds_phase_e = 8'd64;
-            2'd2: dds_phase_e = 8'd128;
-            default: dds_phase_e = 8'd192;
-        endcase
+        dds_phase_a = phase_from_idx(phase_idx[0]);
+        dds_phase_b = phase_from_idx(phase_idx[1]);
+        dds_phase_c = phase_from_idx(phase_idx[2]);
+        dds_phase_d = phase_from_idx(phase_idx[3]);
+        dds_phase_e = phase_from_idx(phase_idx[4]);
 
         // Trigger parameter mapping.
         trig_mode = trig_mode_idx[0];
         trig_edge = trig_edge_idx[0];
 
-        case (trig_level_idx)
-            3'd0: trig_level = 8'd25;
-            3'd1: trig_level = 8'd75;
-            3'd2: trig_level = 8'd128;
-            3'd3: trig_level = 8'd180;
-            default: trig_level = 8'd75;
-        endcase
-
-        case (sample_div_idx[1:0])
-            2'd0: sample_div = 32'd1;//50MHz
-            2'd1: sample_div = 32'd5;//10MHz
-            2'd2: sample_div = 32'd12;//~4.17MHz, ~3 cycles/window at 20kHz
-            default: sample_div = 32'd50;//1MHz
-        endcase
+        trig_level = trig_level_from_idx(trig_level_idx);
+        sample_div = sample_div_from_idx(sample_div_idx);
     end
 
-   
     // Export UI state to display logic.
+    // Intentional one-cycle mirror: ui_* are registered copies of curr_*.
+    // This keeps the renderer interface timing stable and deterministic.
     always @(posedge clk_50m or negedge rst_n) begin
         if (!rst_n) begin
             ui_page           <= PAGE_MAIN;
             ui_cursor         <= 4'd0;
-            ui_curr_edit_mode      <= 1'b0;
-            ui_curr_edit_value     <= 4'd0;
+            ui_curr_edit_mode <= 1'b0;
+            ui_curr_edit_value <= 4'd0;
             ui_active_src_sel <= 3'd0;
         end else begin
             ui_page           <= curr_page;
             ui_cursor         <= curr_cursor;
-            ui_curr_edit_mode      <= curr_edit_mode;
-            ui_curr_edit_value     <= curr_edit_value;
+            ui_curr_edit_mode <= curr_edit_mode;
+            ui_curr_edit_value <= curr_edit_value;
             ui_active_src_sel <= active_src_sel;
         end
     end
