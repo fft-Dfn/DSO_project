@@ -14,6 +14,7 @@
 //   - sample_tick: decimated sampling strobe from sample_div.
 //   - edge_fired: configured trigger edge condition met.
 //   - force_req: auto-mode timeout fallback trigger request.
+//   - last_trigger_timeout: 1 means latest trigger came from auto-timeout.
 //   - frame_start_addr: logical start of display window around trigger point.
 // -----------------------------------------------------------------------------
 module sample_controller #(
@@ -44,6 +45,7 @@ module sample_controller #(
     output reg               capture_done,
     output reg  [ADDR_W-1:0] frame_start_addr,
     output reg               ram_we,
+    output reg               last_trigger_timeout,
 
     output reg  [ADDR_W-1:0] ram_waddr,
     output reg  [DATA_W-1:0] ram_wdata_ch1,
@@ -151,6 +153,7 @@ module sample_controller #(
             capture_done     <= 1'b0;
             frame_start_addr <= {ADDR_W{1'b0}};
             ram_we           <= 1'b0;
+            last_trigger_timeout <= 1'b0;
             ram_waddr        <= {ADDR_W{1'b0}};
             ram_wdata_ch1    <= {DATA_W{1'b0}};
             ram_wdata_ch2    <= {DATA_W{1'b0}};
@@ -214,6 +217,11 @@ module sample_controller #(
                         ram_wdata_ch4 <= ch4_cur;
 
                         if (edge_fired || force_req) begin
+                            if (edge_fired) begin
+                                last_trigger_timeout <= 1'b0;
+                            end else begin
+                                last_trigger_timeout <= 1'b1;
+                            end
                             trig_addr <= wr_ptr;
                             wr_ptr    <= wr_ptr + 1'b1;
                             post_cnt  <= {ADDR_W{1'b0}};

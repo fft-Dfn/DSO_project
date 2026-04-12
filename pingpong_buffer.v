@@ -127,6 +127,8 @@ module pingpong_buffer #(
     reg frame_valid_sync1_wr, frame_valid_sync2_wr;
 
     reg bank0_commit_tog_wr, bank1_commit_tog_wr;
+    reg bank0_commit_req_wr, bank1_commit_req_wr;
+    reg [ADDR_W-1:0] bank0_start_addr_wr, bank1_start_addr_wr;
     reg dbg_we_seen_wr, dbg_capdone_seen_wr, dbg_write_active_seen_wr, dbg_overrun_seen_wr;
     reg dbg_bank0_we_seen_wr, dbg_bank1_we_seen_wr;
 
@@ -151,6 +153,10 @@ module pingpong_buffer #(
             frame_valid_sync2_wr      <= 1'b0;
             bank0_commit_tog_wr       <= 1'b0;
             bank1_commit_tog_wr       <= 1'b0;
+            bank0_commit_req_wr       <= 1'b0;
+            bank1_commit_req_wr       <= 1'b0;
+            bank0_start_addr_wr       <= {ADDR_W{1'b0}};
+            bank1_start_addr_wr       <= {ADDR_W{1'b0}};
             dbg_we_seen_wr            <= 1'b0;
             dbg_capdone_seen_wr       <= 1'b0;
             dbg_write_active_seen_wr  <= 1'b0;
@@ -177,6 +183,17 @@ module pingpong_buffer #(
             frame_valid_sync1_wr <= frame_valid;
             frame_valid_sync2_wr <= frame_valid_sync1_wr;
 
+            // Emit commit toggle one write-clock after metadata latch, so start_addr
+            // stays stable long enough for read-domain synchronizers.
+            if (bank0_commit_req_wr) begin
+                bank0_commit_tog_wr <= ~bank0_commit_tog_wr;
+                bank0_commit_req_wr <= 1'b0;
+            end
+            if (bank1_commit_req_wr) begin
+                bank1_commit_tog_wr <= ~bank1_commit_tog_wr;
+                bank1_commit_req_wr <= 1'b0;
+            end
+
             // Idle steering: always hold next target at non-active bank.
             if (!capture_active_wr && frame_valid_sync2_wr)
                 wr_bank_sel <= ~active_bank_sync2_wr;
@@ -196,9 +213,11 @@ module pingpong_buffer #(
                     dbg_overrun_seen_wr <= 1'b1;
                 end else begin
                     if (capture_bank_wr == 1'b0) begin
-                        bank0_commit_tog_wr       <= ~bank0_commit_tog_wr;
+                        bank0_start_addr_wr       <= frame_start_addr;
+                        bank0_commit_req_wr       <= 1'b1;
                     end else begin
-                        bank1_commit_tog_wr       <= ~bank1_commit_tog_wr;
+                        bank1_start_addr_wr       <= frame_start_addr;
+                        bank1_commit_req_wr       <= 1'b1;
                     end
                 end
 
@@ -217,6 +236,9 @@ module pingpong_buffer #(
     wire bank0_commit_pulse_rd = bank0_commit_sync2_rd ^ bank0_commit_sync2_d_rd;
     wire bank1_commit_pulse_rd = bank1_commit_sync2_rd ^ bank1_commit_sync2_d_rd;
 
+    reg [ADDR_W-1:0] bank0_start_sync1_rd, bank0_start_sync2_rd;
+    reg [ADDR_W-1:0] bank1_start_sync1_rd, bank1_start_sync2_rd;
+
     reg pending_valid_rd;
     reg pending_bank_rd;
     reg [ADDR_W-1:0] pending_start_addr_rd;
@@ -230,6 +252,10 @@ module pingpong_buffer #(
             bank1_commit_sync1_rd         <= 1'b0;
             bank1_commit_sync2_rd         <= 1'b0;
             bank1_commit_sync2_d_rd       <= 1'b0;
+            bank0_start_sync1_rd          <= {ADDR_W{1'b0}};
+            bank0_start_sync2_rd          <= {ADDR_W{1'b0}};
+            bank1_start_sync1_rd          <= {ADDR_W{1'b0}};
+            bank1_start_sync2_rd          <= {ADDR_W{1'b0}};
             active_bank_rd                <= 1'b0;
             pending_valid_rd              <= 1'b0;
             pending_bank_rd               <= 1'b0;
@@ -245,18 +271,22 @@ module pingpong_buffer #(
             bank1_commit_sync1_rd   <= bank1_commit_tog_wr;
             bank1_commit_sync2_rd   <= bank1_commit_sync1_rd;
             bank1_commit_sync2_d_rd <= bank1_commit_sync2_rd;
+            bank0_start_sync1_rd    <= bank0_start_addr_wr;
+            bank0_start_sync2_rd    <= bank0_start_sync1_rd;
+            bank1_start_sync1_rd    <= bank1_start_addr_wr;
+            bank1_start_sync2_rd    <= bank1_start_sync1_rd;
 
             // Keep only the newest completed frame pending.
             if (bank0_commit_pulse_rd) begin
                 pending_valid_rd      <= 1'b1;
                 pending_bank_rd       <= 1'b0;
-                pending_start_addr_rd <= {ADDR_W{1'b0}};
+                pending_start_addr_rd <= bank0_start_sync2_rd;
                 dbg_commit_seen_rd    <= 1'b1;
             end
             if (bank1_commit_pulse_rd) begin
                 pending_valid_rd      <= 1'b1;
                 pending_bank_rd       <= 1'b1;
-                pending_start_addr_rd <= {ADDR_W{1'b0}};
+                pending_start_addr_rd <= bank1_start_sync2_rd;
                 dbg_commit_seen_rd    <= 1'b1;
             end
 

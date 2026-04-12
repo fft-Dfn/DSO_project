@@ -22,7 +22,7 @@ module VGA_top #(
     input  wire [DATA_W-1:0]     rdata_ch2,
     input  wire [DATA_W-1:0]     rdata_ch3,
     input  wire [DATA_W-1:0]     rdata_ch4,
-    input  wire [63:0]           dbg_status,
+    input  wire [65:0]           dbg_status,
     output wire                  rd_frame_done,
 
     // VGA outputs.

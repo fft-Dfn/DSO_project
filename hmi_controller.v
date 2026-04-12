@@ -48,7 +48,7 @@ module hmi_controller (
     output reg         trig_mode,      // 0: normal, 1: auto
     output reg         trig_edge,      // 0: rise,   1: fall
     output reg  [7:0]  trig_level,     
-    output reg  [31:0] sample_div,     // sampling divider: 1/5/50/500 -> 50M/10M/1M/0.1M
+    output reg  [31:0] sample_div,     // sampling divider: 1/5/12/50 -> 50M/10M/4.17M/1M
 
     output reg  [2:0]  sel_ch1,
     output reg  [2:0]  sel_ch2,
@@ -140,12 +140,12 @@ module hmi_controller (
         freq_idx[1]  = 2'd1; type_idx[1]  = 2'd1; phase_idx[1] = 2'd0;
         freq_idx[2]  = 2'd1; type_idx[2]  = 2'd2; phase_idx[2] = 2'd0;
         freq_idx[3]  = 2'd1; type_idx[3]  = 2'd3; phase_idx[3] = 2'd0;
-        freq_idx[4]  = 2'd0; type_idx[4]  = 2'd1; phase_idx[4] = 2'd0;
+        freq_idx[4]  = 2'd1; type_idx[4]  = 2'd1; phase_idx[4] = 2'd0;
 
         trig_mode_idx  = 3'd1;
         trig_edge_idx  = 3'd0;
         trig_level_idx = 3'd2;
-        sample_div_idx = 3'd0;
+        sample_div_idx = 3'd2; // ~4.17MHz default, one window is about 3 cycles at 20kHz
 
         sel_ch1 = 3'd0;
         sel_ch2 = 3'd1;
@@ -294,14 +294,14 @@ module hmi_controller (
             type_idx[3]  <= 2'd3; 
             phase_idx[3] <= 2'd0; 
             // Default trigger source is E.
-            freq_idx[4]  <= 2'd0; //20kHz
+            freq_idx[4]  <= 2'd1; //20kHz
             type_idx[4]  <= 2'd1; // square wave
             phase_idx[4] <= 2'd0; // 0
 
             trig_mode_idx  <= 3'd1;// auto trigger mode
             trig_edge_idx  <= 3'd0;// rising-edge trigger
-            trig_level_idx <= 3'd1;// 
-            sample_div_idx <= 3'd0;//50MHz
+            trig_level_idx <= 3'd2;// 128 mid-level trigger
+            sample_div_idx <= 3'd2;// ~4.17MHz, ~3 cycles/window at 20kHz
 
             sel_ch1        <= 3'd0; // A
             sel_ch2        <= 3'd1; // B
@@ -538,8 +538,8 @@ module hmi_controller (
         case (sample_div_idx[1:0])
             2'd0: sample_div = 32'd1;//50MHz
             2'd1: sample_div = 32'd5;//10MHz
-            2'd2: sample_div = 32'd50;//1MHz
-            default: sample_div = 32'd500;//0.1MHz
+            2'd2: sample_div = 32'd12;//~4.17MHz, ~3 cycles/window at 20kHz
+            default: sample_div = 32'd50;//1MHz
         endcase
     end
 

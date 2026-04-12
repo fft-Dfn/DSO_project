@@ -15,7 +15,7 @@
 //   - frame_valid: read side currently has at least one committed frame.
 //   - rd_frame_done: VGA consumed one full display frame.
 //   - active_frame_start_addr: base address used by current display frame.
-//   - dbg_status[63:0]: in-screen debug bus.
+//   - dbg_status[65:0]: in-screen debug bus.
 // -----------------------------------------------------------------------------
 module DSO_project (
     input  wire        clk_50m,
@@ -209,6 +209,7 @@ module DSO_project (
     wire              capture_done;
     wire [9:0]        frame_start_addr;
     wire              capture_ready;
+    wire              last_trigger_timeout_50;
 
     sample_controller u_sample_controller (
         .clk             (clk_50m),
@@ -234,6 +235,7 @@ module DSO_project (
         .capture_done    (capture_done),
         .frame_start_addr(frame_start_addr),
         .ram_we          (ram_we),
+        .last_trigger_timeout(last_trigger_timeout_50),
         
         .ram_waddr       (ram_waddr),
         .ram_wdata_ch1   (ram_wdata_ch1),
@@ -250,7 +252,7 @@ module DSO_project (
     wire       rd_frame_done;
     wire       [9:0] vga_raddr;
     wire       overflow;
-    wire [63:0] dbg_status;
+    wire [65:0] dbg_status;
     wire [15:0] pp_dbg_bus;
     wire [3:0]  pp_read_tap;
     
@@ -288,7 +290,7 @@ module DSO_project (
 
     );
 
-    // In-screen debug status (64 bits, no external debug pins required):
+    // In-screen debug status (66 bits, no external debug pins required):
     // [0]   rst_n_25
     // [1]   rst_n_50 synced into 25m domain
     // [2]   capture_ready synced into 25m domain
@@ -335,6 +337,8 @@ module DSO_project (
     // [61]  bank1 raw read data non-zero (from pingpong bank1_rdata_b)
     // [62]  active_bank raw read data non-zero
     // [63]  final muxed rdata_ch* non-zero
+    // [64]  last trigger type is normal-edge trigger (N block)
+    // [65]  last trigger type is auto-timeout trigger (T block)
     reg capdone_tog_50;
     always @(posedge clk_50m or negedge rst_n_50) begin
         if (!rst_n_50)
@@ -346,6 +350,7 @@ module DSO_project (
     reg rst50_sync1_25, rst50_sync2_25;
     reg capready_sync1_25, capready_sync2_25;
     reg overflow_sync1_25, overflow_sync2_25;
+    reg trig_timeout_sync1_25, trig_timeout_sync2_25;
     reg capdone_sync1_25, capdone_sync2_25, capdone_sync2_d_25;
     reg [15:0] pp_dbg_sync1_25, pp_dbg_sync2_25;
     reg [3:0] wr_nz_sync1_25, wr_nz_sync2_25;
@@ -365,6 +370,8 @@ module DSO_project (
             capready_sync2_25  <= 1'b0;
             overflow_sync1_25  <= 1'b0;
             overflow_sync2_25  <= 1'b0;
+            trig_timeout_sync1_25 <= 1'b0;
+            trig_timeout_sync2_25 <= 1'b0;
             capdone_sync1_25   <= 1'b0;
             capdone_sync2_25   <= 1'b0;
             capdone_sync2_d_25 <= 1'b0;
@@ -385,6 +392,8 @@ module DSO_project (
             capready_sync2_25  <= capready_sync1_25;
             overflow_sync1_25  <= overflow;
             overflow_sync2_25  <= overflow_sync1_25;
+            trig_timeout_sync1_25 <= last_trigger_timeout_50;
+            trig_timeout_sync2_25 <= trig_timeout_sync1_25;
             capdone_sync1_25   <= capdone_tog_50;
             capdone_sync2_25   <= capdone_sync1_25;
             capdone_sync2_d_25 <= capdone_sync2_25;
@@ -425,6 +434,8 @@ module DSO_project (
     wire ch2_nz_rt = (vga_rdata_ch2 != 8'd0);
     wire ch3_nz_rt = (vga_rdata_ch3 != 8'd0);
     wire ch4_nz_rt = (vga_rdata_ch4 != 8'd0);
+    wire trig_timeout_now_25 = frame_valid && trig_timeout_sync2_25;
+    wire trig_normal_now_25  = frame_valid && ~trig_timeout_sync2_25;
     assign dbg_status_base = {
         (capdone_hold_25 != 22'd0),
         data_seen_25,
@@ -436,6 +447,8 @@ module DSO_project (
         rst_n_25
     };
     assign dbg_status = {
+        trig_timeout_now_25,
+        trig_normal_now_25,
         pp_read_tap,
         active_frame_start_addr,
         vga_raddr,

@@ -29,7 +29,7 @@ module vga_stream_player #(
     input  wire [DATA_W-1:0]     rdata_ch3,
     input  wire [DATA_W-1:0]     rdata_ch4,
 
-    input  wire [63:0]           dbg_status,
+    input  wire [65:0]           dbg_status,
 
     output reg                   rd_frame_done,
     output wire                  frame_start,

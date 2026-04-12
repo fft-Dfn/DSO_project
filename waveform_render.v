@@ -12,6 +12,7 @@
 //
 // Debug Overlay:
 //   - 8x8 debug-bit matrix at top-left (debug_status[63:0]).
+//   - Extra trigger-type blocks (debug_status[64]=N, [65]=T).
 //   - stripe panel at top for bank/address activity quick check.
 // -----------------------------------------------------------------------------
 module waveform_renderer #(
@@ -29,7 +30,7 @@ module waveform_renderer #(
     input  wire [31:0]  s_axis_tdata,
     input  wire         s_axis_tlast,
     input  wire         s_axis_tuser,
-    input  wire [63:0]  debug_status,
+    input  wire [65:0]  debug_status,
 
     output reg  [15:0]  rgb565
 );
@@ -74,6 +75,8 @@ module waveform_renderer #(
     reg ch1_hit, ch2_hit, ch3_hit, ch4_hit;
     reg grid_hit, center_hit;
     reg dbg_hit, dbg_on;
+    reg trig_type_hit;
+    reg [15:0] trig_type_color;
     reg dbg_stripe_hit;
     reg [15:0] dbg_stripe_color;
 
@@ -157,6 +160,8 @@ module waveform_renderer #(
         center_hit = (pix_x == (H_ACTIVE >> 1)) || (pix_y == (V_ACTIVE >> 1));
         dbg_hit    = 1'b0;
         dbg_on     = 1'b0;
+        trig_type_hit = 1'b0;
+        trig_type_color = COLOR_GRID;
         dbg_stripe_hit   = 1'b0;
         dbg_stripe_color = COLOR_BLACK;
 
@@ -253,6 +258,17 @@ module waveform_renderer #(
             else if ((pix_x >= 108) && (pix_x < 120)) begin dbg_hit = 1'b1; dbg_on = debug_status[63]; end
         end
 
+        // Trigger type blocks below matrix:
+        // N block: last trigger came from normal edge (bit64)
+        // T block: last trigger came from auto-timeout (bit65)
+        if ((pix_x >= 10) && (pix_x < 22) && (pix_y >= 124) && (pix_y < 136)) begin
+            trig_type_hit = 1'b1;
+            trig_type_color = debug_status[64] ? 16'h07E0 : 16'h2104;
+        end else if ((pix_x >= 24) && (pix_x < 36) && (pix_y >= 124) && (pix_y < 136)) begin
+            trig_type_hit = 1'b1;
+            trig_type_color = debug_status[65] ? 16'hF800 : 16'h2104;
+        end
+
         // Stripe debug panel (x:130..250):
         // row0 active_bank_rd(bit32), row1..4 raddr[0..3](bit40..43), row5 raddr_changed_rt(bit35).
         if ((pix_x >= 130) && (pix_x < 250)) begin
@@ -281,6 +297,8 @@ module waveform_renderer #(
             rgb565 = COLOR_BLACK;
         end else if (dbg_hit) begin
             rgb565 = dbg_on ? COLOR_DBG_ON : COLOR_DBG_OFF;
+        end else if (trig_type_hit) begin
+            rgb565 = trig_type_color;
         end else if (dbg_stripe_hit) begin
             rgb565 = dbg_stripe_color;
         end else if (ch1_hit) begin
