@@ -30,12 +30,15 @@ module waveform_renderer #(
     input  wire         ui_curr_edit_mode,
     input  wire [3:0]   ui_curr_edit_value,
     input  wire [2:0]   ui_active_src_sel,
-    input  wire [2:0]   view_ch_sel,
     input  wire         trig_mode,
     input  wire         trig_edge,
     input  wire [7:0]   trig_level,
     input  wire [31:0]  sample_div,
     input  wire [2:0]   sel_trig,
+    input  wire [2:0]   flash_ui_state,
+    input  wire         flash_view_enable,
+    input  wire [23:0]  flash_jedec_id,
+    input  wire         flash_jedec_valid,
 
     output reg  [15:0]  rgb565
 );
@@ -61,7 +64,6 @@ module waveform_renderer #(
     localparam [15:0] COLOR_UI_BTN_ACT = 16'h055F;
     localparam [15:0] COLOR_UI_BTN_CUR = 16'h07FF;
     localparam [15:0] COLOR_UI_TEXT    = 16'hAFE5;
-    localparam [15:0] COLOR_VIEW_SEL   = 16'hFFFF;
     localparam [15:0] COLOR_DBG_ON     = 16'h07E0;
     localparam [15:0] COLOR_DBG_OFF    = 16'h8000;
 
@@ -130,9 +132,10 @@ module waveform_renderer #(
     wire center_hit = in_wave_area && ((pix_x == (UI_W + (WAVE_W >> 1))) || (pix_y == (V_ACTIVE >> 1)));
 
     wire ch1_hit = wave_valid && in_span_1px(pix_y, ch1_top, ch1_bot);
-    wire ch2_hit = wave_valid && in_span_1px(pix_y, ch2_top, ch2_bot);
-    wire ch3_hit = wave_valid && in_span_1px(pix_y, ch3_top, ch3_bot);
-    wire ch4_hit = wave_valid && in_span_1px(pix_y, ch4_top, ch4_bot);
+    // In flash-view mode only draw stored waveform (ch1 path), suppress other channels.
+    wire ch2_hit = (!flash_view_enable) && wave_valid && in_span_1px(pix_y, ch2_top, ch2_bot);
+    wire ch3_hit = (!flash_view_enable) && wave_valid && in_span_1px(pix_y, ch3_top, ch3_bot);
+    wire ch4_hit = (!flash_view_enable) && wave_valid && in_span_1px(pix_y, ch4_top, ch4_bot);
 
     // UI value-to-text mapping (centralized).
     wire [31:0] mode_text;
@@ -140,7 +143,7 @@ module waveform_renderer #(
     wire [23:0] level_text;
     wire [31:0] div_text;
     wire [7:0]  trig_src_char;
-    wire [23:0] view_text;
+    reg  [31:0] flash_state_text;
 
     ui_value_map u_ui_value_map (
         .trig_mode      (trig_mode),
@@ -148,19 +151,25 @@ module waveform_renderer #(
         .trig_level     (trig_level),
         .sample_div     (sample_div),
         .sel_trig       (sel_trig),
-        .view_ch_sel    (view_ch_sel),
         .mode_text      (mode_text),
         .edge_char      (edge_char),
         .level_text     (level_text),
         .div_text       (div_text),
-        .trig_src_char  (trig_src_char),
-        .view_text      (view_text)
+        .trig_src_char  (trig_src_char)
     );
 
-    wire view_sel_ch1 = (view_ch_sel == 3'd0);
-    wire view_sel_ch2 = (view_ch_sel == 3'd1);
-    wire view_sel_ch3 = (view_ch_sel == 3'd2);
-    wire view_sel_ch4 = (view_ch_sel == 3'd3);
+    always @(*) begin
+        case (flash_ui_state)
+            3'd1: flash_state_text = 32'h73617665; // save
+            3'd2: flash_state_text = 32'h6c6f6164; // load
+            3'd3: flash_state_text = 32'h646f6e65; // done
+            3'd4: flash_state_text = 32'h63616e63; // canc
+            3'd5: flash_state_text = 32'h74696d65; // time
+            3'd6: flash_state_text = 32'h65727220; // err
+            3'd7: flash_state_text = 32'h76696577; // view
+            default: flash_state_text = 32'h69646c65; // idle
+        endcase
+    end
 
     // Text rendering on left panel: 8x12 glyph in 8x16 cell.
     wire [3:0] cell_row = pix_y[3:0];
@@ -173,6 +182,10 @@ module waveform_renderer #(
     reg [3:0] font_row_idx;
     wire [7:0] font_row_bits;
     reg ui_text_hit;
+    reg in_ui_area_d;
+    reg cell_row_lt12_d;
+    reg ui_char_nonspace_d;
+    reg [2:0] cell_bit_d;
 
     function [7:0] pick32;
         input [31:0] s;
@@ -231,6 +244,16 @@ module waveform_renderer #(
                 src_char3 = 8'h61 + v;
             else
                 src_char3 = 8'h3f;
+        end
+    endfunction
+
+    function [7:0] hex_char;
+        input [3:0] v;
+        begin
+            if (v < 4'd10)
+                hex_char = 8'h30 + v;
+            else
+                hex_char = 8'h61 + (v - 4'd10);
         end
     endfunction
 
@@ -312,12 +335,11 @@ module waveform_renderer #(
                         btn_label3 = str5(8'h64,8'h20,8'h20,8'h20,8'h20);
                         btn_label4 = str5(8'h65,8'h20,8'h20,8'h20,8'h20);
                     end else if (ui_cursor == 4'd5) begin
-                        btn_count  = 3'd5;
+                        btn_count  = 3'd4;
                         btn_label0 = str5(8'h63,8'h68,8'h31,8'h20,8'h20);
                         btn_label1 = str5(8'h63,8'h68,8'h32,8'h20,8'h20);
                         btn_label2 = str5(8'h63,8'h68,8'h33,8'h20,8'h20);
                         btn_label3 = str5(8'h63,8'h68,8'h34,8'h20,8'h20);
-                        btn_label4 = str5(8'h66,8'h6c,8'h73,8'h20,8'h20);
                     end else begin
                         btn_count  = 3'd4;
                         btn_label0 = str5(8'h63,8'h68,8'h31,8'h20,8'h20);
@@ -362,14 +384,13 @@ module waveform_renderer #(
                     btn_label3 = str5(8'h64,8'h69,8'h76,8'h20,8'h20);
                 end
                 PAGE_DISP: begin
-                    btn_count  = 3'd7;
+                    btn_count  = 3'd6;
                     btn_label0 = str5(8'h63,8'h68,8'h31,8'h69,8'h6e);
                     btn_label1 = str5(8'h63,8'h68,8'h32,8'h69,8'h6e);
                     btn_label2 = str5(8'h63,8'h68,8'h33,8'h69,8'h6e);
                     btn_label3 = str5(8'h63,8'h68,8'h34,8'h69,8'h6e);
                     btn_label4 = str5(8'h74,8'h72,8'h67,8'h69,8'h6e);
-                    btn_label5 = str5(8'h76,8'h69,8'h65,8'h77,8'h20);
-                    btn_label6 = str5(8'h73,8'h74,8'h6f,8'h72,8'h65);
+                    btn_label5 = str5(8'h73,8'h74,8'h6f,8'h72,8'h65);
                 end
                 default: begin
                     btn_count  = 3'd0;
@@ -517,19 +538,7 @@ module waveform_renderer #(
                     4'd5: ui_char_code = trig_src_char;
                 endcase
             end
-            5'd21: begin // view:chN/fls
-                case (cell_col)
-                    4'd0: ui_char_code = 8'h76;
-                    4'd1: ui_char_code = 8'h69;
-                    4'd2: ui_char_code = 8'h65;
-                    4'd3: ui_char_code = 8'h77;
-                    4'd4: ui_char_code = 8'h3a;
-                    4'd5: ui_char_code = pick24(view_text, 2'd0);
-                    4'd6: ui_char_code = pick24(view_text, 2'd1);
-                    4'd7: ui_char_code = pick24(view_text, 2'd2);
-                endcase
-            end
-            5'd22: begin // src:x
+            5'd21: begin // src:x
                 case (cell_col)
                     4'd0: ui_char_code = 8'h73;
                     4'd1: ui_char_code = 8'h72;
@@ -538,22 +547,55 @@ module waveform_renderer #(
                     4'd4: ui_char_code = src_char3(ui_active_src_sel);
                 endcase
             end
+            5'd22: begin // fsh:state
+                case (cell_col)
+                    4'd0: ui_char_code = 8'h66; // f
+                    4'd1: ui_char_code = 8'h73; // s
+                    4'd2: ui_char_code = 8'h68; // h
+                    4'd3: ui_char_code = 8'h3a;
+                    4'd4: ui_char_code = pick32(flash_state_text, 2'd0);
+                    4'd5: ui_char_code = pick32(flash_state_text, 2'd1);
+                    4'd6: ui_char_code = pick32(flash_state_text, 2'd2);
+                    4'd7: ui_char_code = pick32(flash_state_text, 2'd3);
+                endcase
+            end
+            5'd23: begin // id:xxxxxx
+                case (cell_col)
+                    4'd0: ui_char_code = 8'h69; // i
+                    4'd1: ui_char_code = 8'h64; // d
+                    4'd2: ui_char_code = 8'h3a; // :
+                    4'd3: ui_char_code = flash_jedec_valid ? hex_char(flash_jedec_id[23:20]) : 8'h2d;
+                    4'd4: ui_char_code = flash_jedec_valid ? hex_char(flash_jedec_id[19:16]) : 8'h2d;
+                    4'd5: ui_char_code = flash_jedec_valid ? hex_char(flash_jedec_id[15:12]) : 8'h2d;
+                    4'd6: ui_char_code = flash_jedec_valid ? hex_char(flash_jedec_id[11:8])  : 8'h2d;
+                    4'd7: ui_char_code = flash_jedec_valid ? hex_char(flash_jedec_id[7:4])   : 8'h2d;
+                    4'd8: ui_char_code = flash_jedec_valid ? hex_char(flash_jedec_id[3:0])   : 8'h2d;
+                endcase
+            end
             default: ui_char_code = 8'h20;
         endcase
+    end
+
+    // Match synchronous font ROM with one-cycle context delay.
+    always @(posedge clk_pix) begin
+        in_ui_area_d      <= in_ui_area;
+        cell_row_lt12_d   <= (cell_row < 4'd12);
+        ui_char_nonspace_d <= (ui_char_code != 8'h20);
+        cell_bit_d        <= cell_bit;
     end
 
     always @(*) begin
         font_char_code = ui_char_code;
         font_row_idx   = cell_row;
         ui_text_hit    = 1'b0;
-
-        if (in_ui_area && (cell_row < 4'd12) && (ui_char_code != 8'h20)) begin
-            if (font_row_bits[7 - cell_bit])
+        if (in_ui_area_d && cell_row_lt12_d && ui_char_nonspace_d) begin
+            if (font_row_bits[7 - cell_bit_d])
                 ui_text_hit = 1'b1;
         end
     end
 
     font8x12_rom u_font8x12_rom (
+        .clk      (clk_pix),
         .char_code(font_char_code),
         .row_idx  (font_row_idx),
         .row_bits (font_row_bits)
@@ -633,23 +675,15 @@ module waveform_renderer #(
             if (in_wave_area && center_hit)
                 rgb565 = COLOR_CENTER;
 
-            // Wave channels.
-            if (ch4_hit && !view_sel_ch4)
+            // Wave channels (independent fixed colors).
+            if (ch4_hit)
                 rgb565 = COLOR_CH4;
-            if (ch3_hit && !view_sel_ch3)
+            if (ch3_hit)
                 rgb565 = COLOR_CH3;
-            if (ch2_hit && !view_sel_ch2)
+            if (ch2_hit)
                 rgb565 = COLOR_CH2;
-            if (ch1_hit && !view_sel_ch1)
-                rgb565 = COLOR_CH1;
-            if (ch1_hit && view_sel_ch1)
-                rgb565 = COLOR_VIEW_SEL;
-            if (ch2_hit && view_sel_ch2)
-                rgb565 = COLOR_VIEW_SEL;
-            if (ch3_hit && view_sel_ch3)
-                rgb565 = COLOR_VIEW_SEL;
-            if (ch4_hit && view_sel_ch4)
-                rgb565 = COLOR_VIEW_SEL;
+            if (ch1_hit)
+                rgb565 = flash_view_enable ? COLOR_UI_BG : COLOR_CH1;
 
             // UI buttons + text.
             if (in_ui_area && btn_hit)

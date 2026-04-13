@@ -60,6 +60,8 @@ module hmi_controller (
     output reg  [1:0]  flash_ch_sel,   // 0~3 => ch1~ch4
     output reg         flash_write_req,
     output reg         flash_read_req,
+    output reg         flash_cancel_req,
+    input  wire        flash_txn_busy,
 
     // UI state outputs for display layer.
    
@@ -68,7 +70,6 @@ module hmi_controller (
     output reg         ui_curr_edit_mode,
     output reg  [3:0]  ui_curr_edit_value,
     output reg  [2:0]  ui_active_src_sel,
-    output reg  [2:0]  view_ch_sel,   // 0..4 => ch1..ch4 + flash
 
     // Persistent parameter interface (auto save/load).
     input  wire        persist_load_valid,
@@ -110,8 +111,7 @@ module hmi_controller (
     localparam DISP_CH3_IN    = 4'd2;
     localparam DISP_CH4_IN    = 4'd3;
     localparam DISP_TRIG_IN   = 4'd4;
-    localparam DISP_VIEW_SEL  = 4'd5;
-    localparam DISP_STORE_SEL = 4'd6;
+    localparam DISP_STORE_SEL = 4'd5;
 
     // Internal UI state registers.
 
@@ -142,7 +142,7 @@ module hmi_controller (
                 PAGE_SRC:     page_max_cursor = 4'd4;
                 PAGE_SRC_CFG: page_max_cursor = 4'd2;
                 PAGE_TRIG:    page_max_cursor = 4'd3;
-                PAGE_DISP:    page_max_cursor = 4'd6;
+                PAGE_DISP:    page_max_cursor = 4'd5;
                 default:      page_max_cursor = 4'd0;
             endcase
         end
@@ -180,7 +180,6 @@ module hmi_controller (
                         DISP_CH3_IN:    edit_max_value = 4'd4;
                         DISP_CH4_IN:    edit_max_value = 4'd4;
                         DISP_TRIG_IN:   edit_max_value = 4'd4;
-                        DISP_VIEW_SEL:  edit_max_value = 4'd4; // ch1~ch4 + flash
                         DISP_STORE_SEL: edit_max_value = 4'd3; // ch1~ch4
                         default:        edit_max_value = 4'd0;
                     endcase
@@ -224,7 +223,6 @@ module hmi_controller (
                         DISP_CH3_IN:    get_current_value = {1'b0, sel_ch3};
                         DISP_CH4_IN:    get_current_value = {1'b0, sel_ch4};
                         DISP_TRIG_IN:   get_current_value = {1'b0, sel_trig};
-                        DISP_VIEW_SEL:  get_current_value = {1'b0, view_ch_sel};
                         DISP_STORE_SEL: get_current_value = {2'b00, flash_ch_sel};
                         default:        get_current_value = 4'd0;
                     endcase
@@ -340,10 +338,16 @@ module hmi_controller (
                                 curr_cursor <= 4'd0;
                             end
                             MAIN_STORE: begin
-                                flash_write_req <= 1'b1;
+                                if (flash_txn_busy)
+                                    flash_cancel_req <= 1'b1;
+                                else
+                                    flash_write_req <= 1'b1;
                             end
                             MAIN_LOAD: begin
-                                flash_read_req <= 1'b1;
+                                if (flash_txn_busy)
+                                    flash_cancel_req <= 1'b1;
+                                else
+                                    flash_read_req <= 1'b1;
                             end
                         endcase
                     end
@@ -435,7 +439,6 @@ module hmi_controller (
                             DISP_CH3_IN:    sel_ch3      <= curr_edit_value[2:0];
                             DISP_CH4_IN:    sel_ch4      <= curr_edit_value[2:0];
                             DISP_TRIG_IN:   sel_trig     <= curr_edit_value[2:0];
-                            DISP_VIEW_SEL:  view_ch_sel  <= curr_edit_value[2:0];
                             DISP_STORE_SEL: flash_ch_sel <= curr_edit_value[1:0];
                         endcase
                         if (curr_cursor <= DISP_TRIG_IN)
@@ -492,16 +495,16 @@ module hmi_controller (
             sel_ch3      <= 3'd2; // C
             sel_ch4      <= 3'd3; // D
             sel_trig     <= 3'd4; // E
-            view_ch_sel  <= 3'd0; // ch1
-
             flash_ch_sel    <= 2'd0; // ch1
             flash_write_req <= 1'b0;
             flash_read_req  <= 1'b0;
+            flash_cancel_req <= 1'b0;
             persist_save_req <= 1'b0;
         end else begin
             // Pulse-type request outputs default low.
             flash_write_req <= 1'b0;
             flash_read_req  <= 1'b0;
+            flash_cancel_req <= 1'b0;
             persist_save_req <= 1'b0;
 
             // Apply persisted configuration once it is loaded from EEPROM.

@@ -31,14 +31,24 @@ module vga_stream_player #(
     input  wire                  ui_curr_edit_mode,
     input  wire [3:0]            ui_curr_edit_value,
     input  wire [2:0]            ui_active_src_sel,
-    input  wire [2:0]            view_ch_sel,
     input  wire                  trig_mode,
     input  wire                  trig_edge,
     input  wire [7:0]            trig_level,
     input  wire [31:0]           sample_div,
     input  wire [2:0]            sel_trig,
+    input  wire [2:0]            flash_ui_state,
+    input  wire                  flash_view_enable,
+    output reg  [ADDR_W-1:0]     flash_view_addr,
+    input  wire [DATA_W-1:0]     flash_view_sample,
+    input  wire                  flash_view_valid,
+    input  wire [23:0]           flash_jedec_id,
+    input  wire                  flash_jedec_valid,
 
     output reg                   rd_frame_done,
+    output reg                   fetch_sample_valid,
+    output reg  [ADDR_W-1:0]     fetch_sample_idx,
+    output reg  [31:0]           fetch_sample_packed,
+    output reg                   fetch_frame_done,
     output wire                  frame_start,
     output wire                  hsync,
     output wire                  vsync,
@@ -86,16 +96,20 @@ module vga_stream_player #(
     reg [10:0]           fetch_resp_idx;
     reg [31:0]           sample_even_hold;
 
-    wire [31:0] sample_packed = {rdata_ch4, rdata_ch3, rdata_ch2, rdata_ch1};
+    wire [31:0] sample_packed_live = {rdata_ch4, rdata_ch3, rdata_ch2, rdata_ch1};
+    wire [31:0] sample_packed_view = {24'd0, flash_view_sample};
+    wire [31:0] sample_packed_fetch =
+        (flash_view_enable && flash_view_valid) ? sample_packed_view : sample_packed_live;
     wire cache_write_fire = fetch_resp_valid && fetch_resp_idx[0];
     wire [8:0] cache_write_addr = fetch_resp_idx[9:1];
-    wire [63:0] cache_write_data = pack_minmax_pair(sample_even_hold, sample_packed);
+    wire [63:0] cache_write_data = pack_minmax_pair(sample_even_hold, sample_packed_fetch);
     wire cache0_we = cache_write_fire && ~fill_cache_sel;
     wire cache1_we = cache_write_fire &&  fill_cache_sel;
 
     wire last_active_pixel = de_d1 &&
                              (pix_x_d1 == H_ACTIVE - 1) &&
                              (pix_y_d1 == V_ACTIVE - 1);
+    wire frame_source_valid = (flash_view_enable && flash_view_valid) || frame_valid;
 
     wire in_wave_area_timing = de_timing &&
                                (pix_x_timing >= UI_W) &&
@@ -178,6 +192,7 @@ module vga_stream_player #(
         if (!rst_n) begin
             frame_base_addr_latched <= {ADDR_W{1'b0}};
             raddr                   <= {ADDR_W{1'b0}};
+            flash_view_addr         <= {ADDR_W{1'b0}};
             active_cache_sel        <= 1'b0;
             fill_cache_sel          <= 1'b1;
             cache_valid             <= 1'b0;
@@ -188,15 +203,27 @@ module vga_stream_player #(
             fetch_resp_valid        <= 1'b0;
             fetch_resp_idx          <= 11'd0;
             sample_even_hold        <= 32'd0;
+            fetch_sample_valid      <= 1'b0;
+            fetch_sample_idx        <= {ADDR_W{1'b0}};
+            fetch_sample_packed     <= 32'd0;
+            fetch_frame_done        <= 1'b0;
         end else begin
+            fetch_sample_valid <= 1'b0;
+            fetch_frame_done   <= 1'b0;
             // Consume previous-cycle fetch response (1-cycle BRAM read latency).
             if (fetch_resp_valid) begin
+                fetch_sample_valid  <= 1'b1;
+                fetch_sample_idx    <= fetch_resp_idx[ADDR_W-1:0];
+                fetch_sample_packed <= sample_packed_live;
+
                 if (!fetch_resp_idx[0]) begin
-                    sample_even_hold <= sample_packed;
+                    sample_even_hold <= sample_packed_fetch;
                 end
 
-                if (fetch_resp_idx == SAMPLE_CNT - 1)
+                if (fetch_resp_idx == SAMPLE_CNT - 1) begin
                     fill_done <= 1'b1;
+                    fetch_frame_done <= 1'b1;
+                end
             end
 
             // Default: no new response tag unless a request is launched.
@@ -216,10 +243,10 @@ module vga_stream_player #(
                     cache_valid      <= 1'b1;
                 end
 
-                if (frame_valid) begin
+                if (frame_source_valid) begin
                     fetching        <= 1'b1;
                     fetch_req_idx   <= 11'd0;
-                    fetch_base_addr <= active_frame_start_addr;
+                    fetch_base_addr <= flash_view_enable ? {ADDR_W{1'b0}} : active_frame_start_addr;
                 end else begin
                     fetching <= 1'b0;
                 end
@@ -228,6 +255,7 @@ module vga_stream_player #(
             // Launch one read request per clock while fetching.
             if (fetching) begin
                 raddr            <= fetch_base_addr + fetch_req_idx[ADDR_W-1:0];
+                flash_view_addr  <= fetch_req_idx[ADDR_W-1:0];
                 fetch_resp_valid <= 1'b1;
                 fetch_resp_idx   <= fetch_req_idx;
 
@@ -238,6 +266,7 @@ module vga_stream_player #(
                 end
             end else begin
                 raddr <= frame_base_addr_latched;
+                flash_view_addr <= {ADDR_W{1'b0}};
             end
         end
     end
@@ -260,7 +289,7 @@ module vga_stream_player #(
             pix_y_d1 <= pix_y_timing;
             in_wave_area_d1 <= in_wave_area_timing;
 
-            axis_tvalid_d1 <= in_wave_area_d1 && frame_valid && cache_valid;
+            axis_tvalid_d1 <= in_wave_area_d1 && frame_source_valid && cache_valid;
             axis_tdata_d1  <= active_cache_sel ? cache1_rd_data : cache0_rd_data;
             axis_tlast_d1  <= in_wave_area_d1 && (pix_x_d1 == (UI_W + WAVE_W - 1));
             axis_tuser_d1  <= in_wave_area_d1 && (pix_x_d1 == UI_W) && (pix_y_d1 == 10'd0);
@@ -290,12 +319,15 @@ module vga_stream_player #(
         .ui_curr_edit_mode  (ui_curr_edit_mode),
         .ui_curr_edit_value (ui_curr_edit_value),
         .ui_active_src_sel  (ui_active_src_sel),
-        .view_ch_sel        (view_ch_sel),
         .trig_mode          (trig_mode),
         .trig_edge          (trig_edge),
         .trig_level         (trig_level),
         .sample_div         (sample_div),
         .sel_trig           (sel_trig),
+        .flash_ui_state     (flash_ui_state),
+        .flash_view_enable  (flash_view_enable),
+        .flash_jedec_id     (flash_jedec_id),
+        .flash_jedec_valid  (flash_jedec_valid),
         .rgb565             (rgb565)
     );
 

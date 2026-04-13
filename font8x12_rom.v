@@ -6,9 +6,10 @@
 //   Storage style follows sine LUT style (readmemh-initialized ROM).
 // -----------------------------------------------------------------------------
 module font8x12_rom (
+    input  wire       clk,
     input  wire [7:0] char_code,
     input  wire [3:0] row_idx,   // 0..11
-    output wire [7:0] row_bits
+    output reg  [7:0] row_bits
 );
 
     localparam GLYPH_H = 12;
@@ -22,7 +23,12 @@ module font8x12_rom (
         $readmemh("font8x12.hex", rom);
     end
 
-    assign row_bits = (row_idx < GLYPH_H) ? rom[addr] : 8'h00;
+    // Synchronous ROM read (same style as sine_lut): one clock latency.
+    always @(posedge clk) begin
+        if (row_idx < GLYPH_H)
+            row_bits <= rom[addr];
+        else
+            row_bits <= 8'h00;
+    end
 
 endmodule
-
