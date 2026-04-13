@@ -39,13 +39,13 @@ module DSO_project (
     input  wire                  sda_eeprom_IN,
     output wire                  sda_eeprom_OUT,
     output wire                  sda_eeprom_OE,
-    output wire                  scl_eeprom
+    output wire                  scl_eeprom,
 
- 
-   // output wire        flash_cs_n,
-    //output wire        flash_sck,
-    //output wire        flash_mosi,
-    //input  wire        flash_miso
+    // SPI flash pins (W25Q32JV).
+    output wire                  flash_cs_n,
+    output wire                  flash_sck,
+    output wire                  flash_mosi,
+    input  wire                  flash_miso
 );
 // Physical key debouncing.
     wire [4:0] raw_keys = {sys_rst_n, key_up_n, key_down_n, key_enter_n, key_back_n};
@@ -127,7 +127,6 @@ module DSO_project (
     wire key_enter_p = ~key_d0[1] & key_d1[1];
     wire key_back_p  = ~key_d0[0] & key_d1[0];
 
-    
 // HMI / configuration control.
     wire [31:0] dds_freq_a, dds_freq_b, dds_freq_c, dds_freq_d, dds_freq_e;
     wire [1:0]  dds_type_a, dds_type_b, dds_type_c, dds_type_d, dds_type_e;
@@ -138,8 +137,17 @@ module DSO_project (
     wire [7:0]  trig_level;
     wire [31:0] sample_div;
     
-    wire        flash_write_req, flash_read_req;
+    wire        flash_write_req, flash_read_req, flash_cancel_req;
     wire [1:0]  flash_ch_sel;
+    wire        flash_txn_busy_50;
+    wire        flash_busy_25;
+    wire        flash_req_ack_pulse_25;
+    wire        flash_done_pulse_25;
+    wire        flash_cancel_pulse_25;
+    wire        flash_timeout_pulse_25;
+    wire        flash_error_25;
+    wire [1:0]  flash_last_op_ch_25;
+    wire        flash_active_is_load_25;
     wire [51:0] persist_save_state;
     wire        persist_save_req;
     wire        persist_load_valid;
@@ -148,10 +156,96 @@ module DSO_project (
     wire        persist_error;
 
     wire [3:0]  ui_page, ui_cursor;
-    wire [2:0]  view_ch_sel;
     wire        ui_curr_edit_mode;
     wire [3:0]  ui_curr_edit_value;
     wire [2:0]  ui_active_src_sel;
+
+    // Flash request CDC (50m -> 25m)
+    reg         flash_wr_tog_50, flash_rd_tog_50, flash_cancel_tog_50;
+    reg [1:0]   flash_wr_ch_50, flash_rd_ch_50;
+    reg         flash_wr_tog_sync1_25, flash_wr_tog_sync2_25, flash_wr_tog_d_25;
+    reg         flash_rd_tog_sync1_25, flash_rd_tog_sync2_25, flash_rd_tog_d_25;
+    reg         flash_cancel_tog_sync1_25, flash_cancel_tog_sync2_25, flash_cancel_tog_d_25;
+    reg [1:0]   flash_wr_ch_sync1_25, flash_wr_ch_sync2_25;
+    reg [1:0]   flash_rd_ch_sync1_25, flash_rd_ch_sync2_25;
+    wire        flash_store_req_25;
+    wire        flash_load_req_edge_25;
+    wire        flash_cancel_req_25;
+    wire [1:0]  flash_store_ch_25;
+    wire [1:0]  flash_load_ch_25;
+    reg         flash_busy_sync1_50, flash_busy_sync2_50;
+
+    // Flash request toggle CDC.
+    always @(posedge clk_50m or negedge rst_n_50) begin
+        if (!rst_n_50) begin
+            flash_wr_tog_50 <= 1'b0;
+            flash_rd_tog_50 <= 1'b0;
+            flash_cancel_tog_50 <= 1'b0;
+            flash_wr_ch_50  <= 2'd0;
+            flash_rd_ch_50  <= 2'd0;
+        end else begin
+            if (flash_write_req) begin
+                flash_wr_tog_50 <= ~flash_wr_tog_50;
+                flash_wr_ch_50  <= flash_ch_sel;
+            end
+            if (flash_read_req) begin
+                flash_rd_tog_50 <= ~flash_rd_tog_50;
+                flash_rd_ch_50  <= flash_ch_sel;
+            end
+            if (flash_cancel_req)
+                flash_cancel_tog_50 <= ~flash_cancel_tog_50;
+        end
+    end
+
+    always @(posedge clk_25m or negedge rst_n_25) begin
+        if (!rst_n_25) begin
+            flash_wr_tog_sync1_25 <= 1'b0;
+            flash_wr_tog_sync2_25 <= 1'b0;
+            flash_wr_tog_d_25     <= 1'b0;
+            flash_rd_tog_sync1_25 <= 1'b0;
+            flash_rd_tog_sync2_25 <= 1'b0;
+            flash_rd_tog_d_25     <= 1'b0;
+            flash_cancel_tog_sync1_25 <= 1'b0;
+            flash_cancel_tog_sync2_25 <= 1'b0;
+            flash_cancel_tog_d_25     <= 1'b0;
+            flash_wr_ch_sync1_25  <= 2'd0;
+            flash_wr_ch_sync2_25  <= 2'd0;
+            flash_rd_ch_sync1_25  <= 2'd0;
+            flash_rd_ch_sync2_25  <= 2'd0;
+        end else begin
+            flash_wr_tog_sync1_25 <= flash_wr_tog_50;
+            flash_wr_tog_sync2_25 <= flash_wr_tog_sync1_25;
+            flash_wr_tog_d_25     <= flash_wr_tog_sync2_25;
+            flash_rd_tog_sync1_25 <= flash_rd_tog_50;
+            flash_rd_tog_sync2_25 <= flash_rd_tog_sync1_25;
+            flash_rd_tog_d_25     <= flash_rd_tog_sync2_25;
+            flash_cancel_tog_sync1_25 <= flash_cancel_tog_50;
+            flash_cancel_tog_sync2_25 <= flash_cancel_tog_sync1_25;
+            flash_cancel_tog_d_25     <= flash_cancel_tog_sync2_25;
+            flash_wr_ch_sync1_25  <= flash_wr_ch_50;
+            flash_wr_ch_sync2_25  <= flash_wr_ch_sync1_25;
+            flash_rd_ch_sync1_25  <= flash_rd_ch_50;
+            flash_rd_ch_sync2_25  <= flash_rd_ch_sync1_25;
+        end
+    end
+
+    assign flash_store_req_25 = flash_wr_tog_sync2_25 ^ flash_wr_tog_d_25;
+    assign flash_load_req_edge_25  = flash_rd_tog_sync2_25 ^ flash_rd_tog_d_25;
+    assign flash_cancel_req_25 = flash_cancel_tog_sync2_25 ^ flash_cancel_tog_d_25;
+    assign flash_store_ch_25  = flash_wr_ch_sync2_25;
+    assign flash_load_ch_25   = flash_rd_ch_sync2_25;
+
+    // Flash busy sync (25m -> 50m) for HMI request arbitration.
+    always @(posedge clk_50m or negedge rst_n_50) begin
+        if (!rst_n_50) begin
+            flash_busy_sync1_50 <= 1'b0;
+            flash_busy_sync2_50 <= 1'b0;
+        end else begin
+            flash_busy_sync1_50 <= flash_busy_25;
+            flash_busy_sync2_50 <= flash_busy_sync1_50;
+        end
+    end
+    assign flash_txn_busy_50 = flash_busy_sync2_50;
 
 
 
@@ -194,13 +288,14 @@ module DSO_project (
         .flash_write_req(flash_write_req),
         .flash_ch_sel   (flash_ch_sel),
         .flash_read_req (flash_read_req),
+        .flash_cancel_req(flash_cancel_req),
+        .flash_txn_busy (flash_txn_busy_50),
 
         .ui_page        (ui_page),
         .ui_cursor      (ui_cursor),
         .ui_curr_edit_mode  (ui_curr_edit_mode),
         .ui_curr_edit_value  (ui_curr_edit_value),
         .ui_active_src_sel   (ui_active_src_sel),
-        .view_ch_sel    (view_ch_sel),
 
         .persist_load_valid (persist_load_valid),
         .persist_load_state (persist_load_state),
@@ -284,10 +379,25 @@ module DSO_project (
     wire [7:0] vga_rdata_ch1, vga_rdata_ch2, vga_rdata_ch3, vga_rdata_ch4;
     wire       rd_frame_done;
     wire       [9:0] vga_raddr;
+    wire              fetch_sample_valid_25;
+    wire [9:0]        fetch_sample_idx_25;
+    wire [31:0]       fetch_sample_packed_25;
+    wire              fetch_frame_done_25;
+    wire [2:0]        flash_ui_state_25;
+    wire [9:0]        flash_view_addr_25;
+    wire [7:0]        flash_view_sample_25;
+    wire              flash_view_valid_25;
+    wire [23:0]       flash_jedec_id_25;
+    wire              flash_jedec_valid_25;
     wire       overflow;
     wire [65:0] dbg_status;
     wire [15:0] pp_dbg_bus;
     wire [3:0]  pp_read_tap;
+    reg  [22:0] flash_done_hold_25;
+    reg  [22:0] flash_cancel_hold_25;
+    reg  [22:0] flash_timeout_hold_25;
+    reg         flash_view_enable_25;
+    reg         flash_load_start_req_25;
     
 
 
@@ -502,6 +612,93 @@ module DSO_project (
         dbg_status_base
     };
 
+    // LOAD key behavior:
+    // - if currently viewing stored waveform and flash is idle: toggle view off
+    // - otherwise: start a LOAD transaction
+    always @(posedge clk_25m or negedge rst_n_25) begin
+        if (!rst_n_25) begin
+            flash_view_enable_25   <= 1'b0;
+            flash_load_start_req_25 <= 1'b0;
+        end else begin
+            flash_load_start_req_25 <= 1'b0;
+
+            if (flash_load_req_edge_25 && !flash_busy_25) begin
+                if (flash_view_enable_25)
+                    flash_view_enable_25 <= 1'b0;
+                else
+                    flash_load_start_req_25 <= 1'b1;
+            end
+
+            if (flash_done_pulse_25 && flash_active_is_load_25)
+                flash_view_enable_25 <= 1'b1;
+        end
+    end
+
+    // Flash UI state (left-bottom status line):
+    // 0 idle, 1 saving, 2 loading, 3 done, 4 cancel, 5 timeout, 7 view
+    always @(posedge clk_25m or negedge rst_n_25) begin
+        if (!rst_n_25) begin
+            flash_done_hold_25    <= 23'd0;
+            flash_cancel_hold_25  <= 23'd0;
+            flash_timeout_hold_25 <= 23'd0;
+        end else begin
+            if (flash_done_pulse_25)
+                flash_done_hold_25 <= 23'h7fffff;
+            else if (flash_done_hold_25 != 23'd0)
+                flash_done_hold_25 <= flash_done_hold_25 - 1'b1;
+
+            if (flash_cancel_pulse_25)
+                flash_cancel_hold_25 <= 23'h7fffff;
+            else if (flash_cancel_hold_25 != 23'd0)
+                flash_cancel_hold_25 <= flash_cancel_hold_25 - 1'b1;
+
+            if (flash_timeout_pulse_25)
+                flash_timeout_hold_25 <= 23'h7fffff;
+            else if (flash_timeout_hold_25 != 23'd0)
+                flash_timeout_hold_25 <= flash_timeout_hold_25 - 1'b1;
+        end
+    end
+
+    assign flash_ui_state_25 =
+        flash_busy_25                     ? (flash_active_is_load_25 ? 3'd2 : 3'd1) :
+        (flash_timeout_hold_25 != 23'd0)  ? 3'd5 :
+        (flash_cancel_hold_25 != 23'd0)   ? 3'd4 :
+        flash_view_enable_25              ? 3'd7 :
+        (flash_done_hold_25 != 23'd0)     ? 3'd3 :
+                                            3'd0;
+
+    // Flash waveform store/load backend (fixed per-channel sectors).
+    flash_wave_store_load u_flash_wave_store_load (
+        .clk_25m            (clk_25m),
+        .rst_n              (rst_n_25),
+        .store_req          (flash_store_req_25),
+        .load_req           (flash_load_start_req_25),
+        .cancel_req         (flash_cancel_req_25),
+        .store_ch_sel       (flash_store_ch_25),
+        .load_ch_sel        (flash_load_ch_25),
+        .fetch_sample_valid (fetch_sample_valid_25),
+        .fetch_sample_idx   (fetch_sample_idx_25),
+        .fetch_sample_packed(fetch_sample_packed_25),
+        .fetch_frame_done   (fetch_frame_done_25),
+        .flash_view_addr    (flash_view_addr_25),
+        .flash_view_sample  (flash_view_sample_25),
+        .flash_view_valid   (flash_view_valid_25),
+        .flash_busy         (flash_busy_25),
+        .flash_req_ack_pulse(flash_req_ack_pulse_25),
+        .flash_done_pulse   (flash_done_pulse_25),
+        .flash_cancel_pulse (flash_cancel_pulse_25),
+        .flash_timeout_pulse(flash_timeout_pulse_25),
+        .flash_error        (flash_error_25),
+        .flash_last_op_ch   (flash_last_op_ch_25),
+        .flash_active_is_load(flash_active_is_load_25),
+        .flash_jedec_id     (flash_jedec_id_25),
+        .flash_jedec_valid  (flash_jedec_valid_25),
+        .flash_cs_n         (flash_cs_n),
+        .flash_sck          (flash_sck),
+        .flash_mosi         (flash_mosi),
+        .flash_miso         (flash_miso)
+    );
+
    wire [15:0] rgb_565;
    assign vga_r     = rgb_565[15:11];
    assign vga_g     = rgb_565[10:5];
@@ -511,6 +708,11 @@ module DSO_project (
 		      // Outputs
 		      .raddr		(vga_raddr),
 		      .rd_frame_done	(rd_frame_done),
+		      .fetch_sample_valid(fetch_sample_valid_25),
+		      .fetch_sample_idx (fetch_sample_idx_25),
+		      .fetch_sample_packed(fetch_sample_packed_25),
+		      .fetch_frame_done (fetch_frame_done_25),
+		      .flash_view_addr (flash_view_addr_25),
 		      .hsync		(vga_hs),
 		      .vsync		(vga_vs),
 		      .rgb565		(rgb_565),
@@ -529,12 +731,17 @@ module DSO_project (
 		      .ui_curr_edit_mode(ui_curr_edit_mode),
 		      .ui_curr_edit_value(ui_curr_edit_value),
 		      .ui_active_src_sel(ui_active_src_sel),
-		      .view_ch_sel      (view_ch_sel),
 		      .trig_mode        (trig_mode),
 		      .trig_edge        (trig_edge),
 		      .trig_level       (trig_level),
 		      .sample_div       (sample_div),
-		      .sel_trig         (sel_trig)
+		      .sel_trig         (sel_trig),
+		      .flash_ui_state   (flash_ui_state_25),
+		      .flash_view_enable(flash_view_enable_25),
+		      .flash_view_sample(flash_view_sample_25),
+		      .flash_view_valid (flash_view_valid_25),
+		      .flash_jedec_id   (flash_jedec_id_25),
+		      .flash_jedec_valid(flash_jedec_valid_25)
           );
    
 endmodule
