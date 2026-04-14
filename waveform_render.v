@@ -4,6 +4,8 @@
 // Purpose:
 //   - Left panel (128x480): simple UI buttons + real-time sampled parameters.
 //   - Right panel (512x480): oscilloscope waveform using min/max vertical bars.
+//   - Digital persistence: previous-frame trace rendered in dim color.
+//   - Linear interpolation: connect neighbor column centers for smoother low-rate view.
 //   - Debug matrix kept (size unchanged) and moved to top-right.
 // -----------------------------------------------------------------------------
 module waveform_renderer #(
@@ -19,6 +21,7 @@ module waveform_renderer #(
     input  wire         s_axis_tvalid,
     output wire         s_axis_tready,
     input  wire [63:0]  s_axis_tdata, // {ch4_max,ch4_min,...,ch1_max,ch1_min}
+    input  wire [63:0]  s_axis_prev_tdata, // previous frame column (for persistence)
     input  wire         s_axis_tlast,
     input  wire         s_axis_tuser,
 
@@ -59,6 +62,14 @@ module waveform_renderer #(
     localparam [15:0] COLOR_CH2        = 16'h07E0;
     localparam [15:0] COLOR_CH3        = 16'h001F;
     localparam [15:0] COLOR_CH4        = 16'hFFE0;
+    localparam [15:0] COLOR_CH1_DIM    = 16'h7800;
+    localparam [15:0] COLOR_CH2_DIM    = 16'h03C0;
+    localparam [15:0] COLOR_CH3_DIM    = 16'h000C;
+    localparam [15:0] COLOR_CH4_DIM    = 16'h7BC0;
+    localparam [15:0] COLOR_CH1_BOOST  = 16'hFC10;
+    localparam [15:0] COLOR_CH2_BOOST  = 16'h87F0;
+    localparam [15:0] COLOR_CH3_BOOST  = 16'h83FF;
+    localparam [15:0] COLOR_CH4_BOOST  = 16'hFFF0;
     localparam [15:0] COLOR_UI_BG      = 16'h18C3;
     localparam [15:0] COLOR_UI_BTN     = 16'h2128;
     localparam [15:0] COLOR_UI_BTN_ACT = 16'h055F;
@@ -85,6 +96,14 @@ module waveform_renderer #(
     wire [7:0] ch3_max = s_axis_tdata[47:40];
     wire [7:0] ch4_min = s_axis_tdata[55:48];
     wire [7:0] ch4_max = s_axis_tdata[63:56];
+    wire [7:0] pch1_min = s_axis_prev_tdata[7:0];
+    wire [7:0] pch1_max = s_axis_prev_tdata[15:8];
+    wire [7:0] pch2_min = s_axis_prev_tdata[23:16];
+    wire [7:0] pch2_max = s_axis_prev_tdata[31:24];
+    wire [7:0] pch3_min = s_axis_prev_tdata[39:32];
+    wire [7:0] pch3_max = s_axis_prev_tdata[47:40];
+    wire [7:0] pch4_min = s_axis_prev_tdata[55:48];
+    wire [7:0] pch4_max = s_axis_prev_tdata[63:56];
 
     function [9:0] sample_to_y;
         input [7:0] s;
@@ -117,6 +136,30 @@ module waveform_renderer #(
     wire [9:0] ch3_bot = sample_to_y(ch3_min);
     wire [9:0] ch4_top = sample_to_y(ch4_max);
     wire [9:0] ch4_bot = sample_to_y(ch4_min);
+    wire [9:0] pch1_top = sample_to_y(pch1_max);
+    wire [9:0] pch1_bot = sample_to_y(pch1_min);
+    wire [9:0] pch2_top = sample_to_y(pch2_max);
+    wire [9:0] pch2_bot = sample_to_y(pch2_min);
+    wire [9:0] pch3_top = sample_to_y(pch3_max);
+    wire [9:0] pch3_bot = sample_to_y(pch3_min);
+    wire [9:0] pch4_top = sample_to_y(pch4_max);
+    wire [9:0] pch4_bot = sample_to_y(pch4_min);
+    wire [7:0] ch1_mid_s = (ch1_min >> 1) + (ch1_max >> 1);
+    wire [7:0] ch2_mid_s = (ch2_min >> 1) + (ch2_max >> 1);
+    wire [7:0] ch3_mid_s = (ch3_min >> 1) + (ch3_max >> 1);
+    wire [7:0] ch4_mid_s = (ch4_min >> 1) + (ch4_max >> 1);
+    wire [7:0] pch1_mid_s = (pch1_min >> 1) + (pch1_max >> 1);
+    wire [7:0] pch2_mid_s = (pch2_min >> 1) + (pch2_max >> 1);
+    wire [7:0] pch3_mid_s = (pch3_min >> 1) + (pch3_max >> 1);
+    wire [7:0] pch4_mid_s = (pch4_min >> 1) + (pch4_max >> 1);
+    wire [9:0] ch1_mid_y = sample_to_y(ch1_mid_s);
+    wire [9:0] ch2_mid_y = sample_to_y(ch2_mid_s);
+    wire [9:0] ch3_mid_y = sample_to_y(ch3_mid_s);
+    wire [9:0] ch4_mid_y = sample_to_y(ch4_mid_s);
+    wire [9:0] pch1_mid_y = sample_to_y(pch1_mid_s);
+    wire [9:0] pch2_mid_y = sample_to_y(pch2_mid_s);
+    wire [9:0] pch3_mid_y = sample_to_y(pch3_mid_s);
+    wire [9:0] pch4_mid_y = sample_to_y(pch4_mid_s);
 
     wire in_ui_area   = (pix_x < UI_W);
     wire in_wave_area = (pix_x >= UI_W) && (pix_x < (UI_W + WAVE_W));
@@ -131,11 +174,38 @@ module waveform_renderer #(
     wire grid_hit   = in_wave_area && (grid_v_hit || grid_h_hit);
     wire center_hit = in_wave_area && ((pix_x == (UI_W + (WAVE_W >> 1))) || (pix_y == (V_ACTIVE >> 1)));
 
-    wire ch1_hit = wave_valid && in_span_1px(pix_y, ch1_top, ch1_bot);
+    wire ch1_bar_hit = wave_valid && in_span_1px(pix_y, ch1_top, ch1_bot);
     // In flash-view mode only draw stored waveform (ch1 path), suppress other channels.
-    wire ch2_hit = (!flash_view_enable) && wave_valid && in_span_1px(pix_y, ch2_top, ch2_bot);
-    wire ch3_hit = (!flash_view_enable) && wave_valid && in_span_1px(pix_y, ch3_top, ch3_bot);
-    wire ch4_hit = (!flash_view_enable) && wave_valid && in_span_1px(pix_y, ch4_top, ch4_bot);
+    wire ch2_bar_hit = (!flash_view_enable) && wave_valid && in_span_1px(pix_y, ch2_top, ch2_bot);
+    wire ch3_bar_hit = (!flash_view_enable) && wave_valid && in_span_1px(pix_y, ch3_top, ch3_bot);
+    wire ch4_bar_hit = (!flash_view_enable) && wave_valid && in_span_1px(pix_y, ch4_top, ch4_bot);
+    wire pch1_bar_hit = wave_valid && in_span_1px(pix_y, pch1_top, pch1_bot);
+    wire pch2_bar_hit = (!flash_view_enable) && wave_valid && in_span_1px(pix_y, pch2_top, pch2_bot);
+    wire pch3_bar_hit = (!flash_view_enable) && wave_valid && in_span_1px(pix_y, pch3_top, pch3_bot);
+    wire pch4_bar_hit = (!flash_view_enable) && wave_valid && in_span_1px(pix_y, pch4_top, pch4_bot);
+
+    // Linear interpolation bridge: connect neighboring column centers for low-sample scenarios.
+    reg       mid_prev_valid;
+    reg [9:0] ch1_mid_prev, ch2_mid_prev, ch3_mid_prev, ch4_mid_prev;
+    reg [9:0] pch1_mid_prev, pch2_mid_prev, pch3_mid_prev, pch4_mid_prev;
+    wire interp_en = wave_valid && mid_prev_valid && (wave_x != 11'd0);
+    wire ch1_line_hit = interp_en && in_span_1px(pix_y, ch1_mid_prev, ch1_mid_y);
+    wire ch2_line_hit = (!flash_view_enable) && interp_en && in_span_1px(pix_y, ch2_mid_prev, ch2_mid_y);
+    wire ch3_line_hit = (!flash_view_enable) && interp_en && in_span_1px(pix_y, ch3_mid_prev, ch3_mid_y);
+    wire ch4_line_hit = (!flash_view_enable) && interp_en && in_span_1px(pix_y, ch4_mid_prev, ch4_mid_y);
+    wire pch1_line_hit = interp_en && in_span_1px(pix_y, pch1_mid_prev, pch1_mid_y);
+    wire pch2_line_hit = (!flash_view_enable) && interp_en && in_span_1px(pix_y, pch2_mid_prev, pch2_mid_y);
+    wire pch3_line_hit = (!flash_view_enable) && interp_en && in_span_1px(pix_y, pch3_mid_prev, pch3_mid_y);
+    wire pch4_line_hit = (!flash_view_enable) && interp_en && in_span_1px(pix_y, pch4_mid_prev, pch4_mid_y);
+
+    wire ch1_hit = ch1_bar_hit || ch1_line_hit;
+    wire ch2_hit = ch2_bar_hit || ch2_line_hit;
+    wire ch3_hit = ch3_bar_hit || ch3_line_hit;
+    wire ch4_hit = ch4_bar_hit || ch4_line_hit;
+    wire pch1_hit = pch1_bar_hit || pch1_line_hit;
+    wire pch2_hit = pch2_bar_hit || pch2_line_hit;
+    wire pch3_hit = pch3_bar_hit || pch3_line_hit;
+    wire pch4_hit = pch4_bar_hit || pch4_line_hit;
 
     // UI value-to-text mapping (centralized).
     wire [31:0] mode_text;
@@ -594,6 +664,23 @@ module waveform_renderer #(
         end
     end
 
+    // Track previous column center values for per-line interpolation.
+    always @(posedge clk_pix) begin
+        if (!de || !in_wave_area) begin
+            mid_prev_valid <= 1'b0;
+        end else if (wave_valid) begin
+            mid_prev_valid <= 1'b1;
+            ch1_mid_prev <= ch1_mid_y;
+            ch2_mid_prev <= ch2_mid_y;
+            ch3_mid_prev <= ch3_mid_y;
+            ch4_mid_prev <= ch4_mid_y;
+            pch1_mid_prev <= pch1_mid_y;
+            pch2_mid_prev <= pch2_mid_y;
+            pch3_mid_prev <= pch3_mid_y;
+            pch4_mid_prev <= pch4_mid_y;
+        end
+    end
+
     font8x12_rom u_font8x12_rom (
         .clk      (clk_pix),
         .char_code(font_char_code),
@@ -676,6 +763,19 @@ module waveform_renderer #(
                 rgb565 = COLOR_CENTER;
 
             // Wave channels (independent fixed colors).
+            // Persistence layering:
+            // - previous frame: dim color
+            // - current frame : bright color
+            // - overlap       : boosted bright color
+            if (pch4_hit)
+                rgb565 = COLOR_CH4_DIM;
+            if (pch3_hit)
+                rgb565 = COLOR_CH3_DIM;
+            if (pch2_hit)
+                rgb565 = COLOR_CH2_DIM;
+            if (pch1_hit)
+                rgb565 = flash_view_enable ? 16'h10A2 : COLOR_CH1_DIM;
+
             if (ch4_hit)
                 rgb565 = COLOR_CH4;
             if (ch3_hit)
@@ -684,6 +784,15 @@ module waveform_renderer #(
                 rgb565 = COLOR_CH2;
             if (ch1_hit)
                 rgb565 = flash_view_enable ? COLOR_UI_BG : COLOR_CH1;
+
+            if (pch4_hit && ch4_hit)
+                rgb565 = COLOR_CH4_BOOST;
+            if (pch3_hit && ch3_hit)
+                rgb565 = COLOR_CH3_BOOST;
+            if (pch2_hit && ch2_hit)
+                rgb565 = COLOR_CH2_BOOST;
+            if (pch1_hit && ch1_hit)
+                rgb565 = flash_view_enable ? 16'h18C3 : COLOR_CH1_BOOST;
 
             // UI buttons + text.
             if (in_ui_area && btn_hit)

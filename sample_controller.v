@@ -85,20 +85,33 @@ module sample_controller #(
     wire [DATA_W-1:0] ch4_sig  = mux_5to1(sel_ch4,  in_a, in_b, in_c, in_d, in_e);
 
     reg [31:0] div_cnt;
+    reg [31:0] sample_div_latched;
     reg        sample_tick;
+    wire [31:0] sample_div_eff = (sample_div <= 32'd1) ? 32'd1 : sample_div;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             div_cnt     <= 32'd0;
+            sample_div_latched <= 32'd1;
             sample_tick <= 1'b0;
-        end else if (sample_div <= 32'd1) begin
-            div_cnt     <= 32'd0;
-            sample_tick <= 1'b1;
-        end else if (div_cnt == sample_div - 1'b1) begin
-            div_cnt     <= 32'd0;
-            sample_tick <= 1'b1;
         end else begin
-            div_cnt     <= div_cnt + 1'b1;
-            sample_tick <= 1'b0;
+            // Robust divider update:
+            // 1) If sample_div changes, restart phase immediately.
+            // 2) Use >= compare to avoid long stall when new divider is smaller
+            //    than current div_cnt (prevents wraparound wait).
+            if (sample_div_eff != sample_div_latched) begin
+                sample_div_latched <= sample_div_eff;
+                div_cnt            <= 32'd0;
+                sample_tick        <= 1'b1;
+            end else if (sample_div_eff == 32'd1) begin
+                div_cnt     <= 32'd0;
+                sample_tick <= 1'b1;
+            end else if (div_cnt >= (sample_div_eff - 1'b1)) begin
+                div_cnt     <= 32'd0;
+                sample_tick <= 1'b1;
+            end else begin
+                div_cnt     <= div_cnt + 1'b1;
+                sample_tick <= 1'b0;
+            end
         end
     end
 

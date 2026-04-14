@@ -4,6 +4,7 @@
 // Purpose:
 //   1) Build 1024-sample -> 512-column min/max cache in read clock domain.
 //   2) Feed renderer with one min/max column per active waveform pixel.
+//   3) Keep one previous-frame cache for low-cost digital persistence.
 // -----------------------------------------------------------------------------
 module vga_stream_player #(
     parameter DATA_W   = 8,
@@ -70,6 +71,7 @@ module vga_stream_player #(
     // AXIS-like stream for renderer: one beat = one wave column min/max (4 channels packed).
     reg          axis_tvalid_d1;
     reg [63:0]   axis_tdata_d1;
+    reg [63:0]   axis_tprev_d1;
     reg          axis_tlast_d1;
     reg          axis_tuser_d1;
 
@@ -80,13 +82,24 @@ module vga_stream_player #(
     // {ch4_max,ch4_min,ch3_max,ch3_min,ch2_max,ch2_min,ch1_max,ch1_min}
     (* ram_style = "block" *) reg [63:0] minmax_cache0 [0:WAVE_W-1];
     (* ram_style = "block" *) reg [63:0] minmax_cache1 [0:WAVE_W-1];
+    (* ram_style = "block" *) reg [63:0] persist_cache [0:WAVE_W-1];
     reg        active_cache_sel;
     reg        fill_cache_sel;
     reg        cache_valid;
     reg        fill_done;
-    reg [8:0]  cache_rd_addr;
+    reg [8:0]  cache0_rd_addr;
+    reg [8:0]  cache1_rd_addr;
+    reg [8:0]  prev_cache_rd_addr;
     reg [63:0] cache0_rd_data;
     reg [63:0] cache1_rd_data;
+    reg [63:0] prev_cache_rd_data;
+
+    // Previous-frame cache copy engine.
+    reg        persist_copy_active;
+    reg        persist_copy_src_sel;   // 0: cache0, 1: cache1
+    reg [8:0]  persist_copy_req_idx;
+    reg        persist_copy_resp_valid;
+    reg [8:0]  persist_copy_resp_idx;
 
     // Fetch engine (reads 1024 samples from BRAM port B every display frame).
     reg                  fetching;
@@ -95,6 +108,8 @@ module vga_stream_player #(
     reg                  fetch_resp_valid;
     reg [10:0]           fetch_resp_idx;
     reg [31:0]           sample_even_hold;
+    reg                  fetch_start_pending;
+    reg [ADDR_W-1:0]     fetch_start_base_addr;
 
     wire [31:0] sample_packed_live = {rdata_ch4, rdata_ch3, rdata_ch2, rdata_ch1};
     wire [31:0] sample_packed_view = {24'd0, flash_view_sample};
@@ -105,6 +120,8 @@ module vga_stream_player #(
     wire [63:0] cache_write_data = pack_minmax_pair(sample_even_hold, sample_packed_fetch);
     wire cache0_we = cache_write_fire && ~fill_cache_sel;
     wire cache1_we = cache_write_fire &&  fill_cache_sel;
+    wire persist_copy_fire = persist_copy_resp_valid;
+    wire [63:0] persist_copy_data = persist_copy_src_sel ? cache1_rd_data : cache0_rd_data;
 
     wire last_active_pixel = de_d1 &&
                              (pix_x_d1 == H_ACTIVE - 1) &&
@@ -159,21 +176,40 @@ module vga_stream_player #(
 
     reg in_wave_area_d1;
 
-    // Cache memories: synchronous read + synchronous write for BRAM inference.
+    // Cache memories:
+    // - cache0/cache1: ping-pong min/max frame caches.
+    // - persist_cache: previous-frame cache for digital persistence.
+    // All ports are synchronous to keep BRAM inference stable.
     always @(posedge clk_25m) begin
-        if (in_wave_area_timing)
-            cache_rd_addr <= wave_col_idx_timing;
-        else
-            cache_rd_addr <= 9'd0;
+        if (in_wave_area_timing) begin
+            cache0_rd_addr     <= wave_col_idx_timing;
+            cache1_rd_addr     <= wave_col_idx_timing;
+            prev_cache_rd_addr <= wave_col_idx_timing;
+        end else begin
+            cache0_rd_addr     <= 9'd0;
+            cache1_rd_addr     <= 9'd0;
+            prev_cache_rd_addr <= 9'd0;
+        end
 
-        cache0_rd_data <= minmax_cache0[cache_rd_addr];
+        // Copy source override: use the inactive cache read port for persistence copy.
+        if (persist_copy_active) begin
+            if (persist_copy_src_sel)
+                cache1_rd_addr <= persist_copy_req_idx;
+            else
+                cache0_rd_addr <= persist_copy_req_idx;
+        end
+
+        cache0_rd_data <= minmax_cache0[cache0_rd_addr];
         if (cache0_we)
             minmax_cache0[cache_write_addr] <= cache_write_data;
 
-        cache1_rd_data <= minmax_cache1[cache_rd_addr];
+        cache1_rd_data <= minmax_cache1[cache1_rd_addr];
         if (cache1_we)
             minmax_cache1[cache_write_addr] <= cache_write_data;
 
+        prev_cache_rd_data <= persist_cache[prev_cache_rd_addr];
+        if (persist_copy_fire)
+            persist_cache[persist_copy_resp_idx] <= persist_copy_data;
     end
 
     vga_timing u_vga_timing (
@@ -203,13 +239,21 @@ module vga_stream_player #(
             fetch_resp_valid        <= 1'b0;
             fetch_resp_idx          <= 11'd0;
             sample_even_hold        <= 32'd0;
+            fetch_start_pending     <= 1'b0;
+            fetch_start_base_addr   <= {ADDR_W{1'b0}};
             fetch_sample_valid      <= 1'b0;
             fetch_sample_idx        <= {ADDR_W{1'b0}};
             fetch_sample_packed     <= 32'd0;
             fetch_frame_done        <= 1'b0;
+            persist_copy_active     <= 1'b0;
+            persist_copy_src_sel    <= 1'b0;
+            persist_copy_req_idx    <= 9'd0;
+            persist_copy_resp_valid <= 1'b0;
+            persist_copy_resp_idx   <= 9'd0;
         end else begin
             fetch_sample_valid <= 1'b0;
             fetch_frame_done   <= 1'b0;
+            persist_copy_resp_valid <= 1'b0;
             // Consume previous-cycle fetch response (1-cycle BRAM read latency).
             if (fetch_resp_valid) begin
                 fetch_sample_valid  <= 1'b1;
@@ -237,6 +281,12 @@ module vga_stream_player #(
                 frame_base_addr_latched <= active_frame_start_addr;
 
                 if (fill_done) begin
+                    // Snapshot old active cache into persistence cache.
+                    // "active_cache_sel" is still the old active bank in this cycle.
+                    persist_copy_active   <= 1'b1;
+                    persist_copy_src_sel  <= active_cache_sel;
+                    persist_copy_req_idx  <= 9'd0;
+
                     active_cache_sel <= fill_cache_sel;
                     fill_cache_sel   <= ~fill_cache_sel;
                     fill_done        <= 1'b0;
@@ -244,11 +294,13 @@ module vga_stream_player #(
                 end
 
                 if (frame_source_valid) begin
-                    fetching        <= 1'b1;
-                    fetch_req_idx   <= 11'd0;
-                    fetch_base_addr <= flash_view_enable ? {ADDR_W{1'b0}} : active_frame_start_addr;
+                    // Delay fetch start until persistence copy is done to avoid
+                    // reading old frame data while it is being overwritten.
+                    fetch_start_pending   <= 1'b1;
+                    fetch_start_base_addr <= flash_view_enable ? {ADDR_W{1'b0}} : active_frame_start_addr;
                 end else begin
-                    fetching <= 1'b0;
+                    fetching            <= 1'b0;
+                    fetch_start_pending <= 1'b0;
                 end
             end
 
@@ -268,6 +320,24 @@ module vga_stream_player #(
                 raddr <= frame_base_addr_latched;
                 flash_view_addr <= {ADDR_W{1'b0}};
             end
+
+            // Copy 512 columns from old active cache into persistence cache.
+            if (persist_copy_active) begin
+                persist_copy_resp_valid <= 1'b1;
+                persist_copy_resp_idx   <= persist_copy_req_idx;
+                if (persist_copy_req_idx == (WAVE_W - 1)) begin
+                    persist_copy_active <= 1'b0;
+                end else begin
+                    persist_copy_req_idx <= persist_copy_req_idx + 1'b1;
+                end
+            end
+
+            if (!fetching && fetch_start_pending && !persist_copy_active) begin
+                fetching            <= 1'b1;
+                fetch_req_idx       <= 11'd0;
+                fetch_base_addr     <= fetch_start_base_addr;
+                fetch_start_pending <= 1'b0;
+            end
         end
     end
 
@@ -280,6 +350,7 @@ module vga_stream_player #(
             in_wave_area_d1 <= 1'b0;
             axis_tvalid_d1 <= 1'b0;
             axis_tdata_d1  <= 64'd0;
+            axis_tprev_d1  <= 64'd0;
             axis_tlast_d1  <= 1'b0;
             axis_tuser_d1  <= 1'b0;
             rd_frame_done  <= 1'b0;
@@ -291,6 +362,7 @@ module vga_stream_player #(
 
             axis_tvalid_d1 <= in_wave_area_d1 && frame_source_valid && cache_valid;
             axis_tdata_d1  <= active_cache_sel ? cache1_rd_data : cache0_rd_data;
+            axis_tprev_d1  <= prev_cache_rd_data;
             axis_tlast_d1  <= in_wave_area_d1 && (pix_x_d1 == (UI_W + WAVE_W - 1));
             axis_tuser_d1  <= in_wave_area_d1 && (pix_x_d1 == UI_W) && (pix_y_d1 == 10'd0);
 
@@ -311,6 +383,7 @@ module vga_stream_player #(
         .s_axis_tvalid      (axis_tvalid_d1),
         .s_axis_tready      (renderer_axis_tready_unused),
         .s_axis_tdata       (axis_tdata_d1),
+        .s_axis_prev_tdata  (axis_tprev_d1),
         .s_axis_tlast       (axis_tlast_d1),
         .s_axis_tuser       (axis_tuser_d1),
         .debug_status       (dbg_status),
