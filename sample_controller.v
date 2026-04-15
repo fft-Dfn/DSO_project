@@ -56,7 +56,10 @@ module sample_controller #(
 
     localparam DEPTH      = (1 << ADDR_W);
     localparam HALF_DEPTH = (DEPTH >> 1);
-    localparam POST_COUNT = HALF_DEPTH - 1;
+    // Post-trigger samples should be 511 (not 512) because trigger sample
+    // itself is already written in S_ARMED when edge_fired.
+    // This prevents overwriting frame_start_addr (trig_addr - HALF_DEPTH).
+    localparam POST_COUNT = HALF_DEPTH - 2;
 
     localparam S_IDLE    = 2'd0;
     localparam S_PREFILL = 2'd1;

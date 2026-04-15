@@ -166,6 +166,10 @@ module waveform_renderer #(
     wire wave_valid   = s_axis_tvalid && s_axis_tready && in_wave_area;
 
     wire [10:0] wave_x = pix_x - UI_W;
+    // High-sample-rate mode (small divider) tends to amplify frame-to-frame
+    // trigger quantization jitter in persistence overlay.
+    // Disable previous-frame overlay in this mode to avoid visible kinks.
+    wire persistence_en = (sample_div >= 32'd12);
     wire grid_v_hit = (wave_x[5:0] == 6'd0);
     wire grid_h_hit = (pix_y == 10'd0)   || (pix_y == 10'd60)  ||
                       (pix_y == 10'd120) || (pix_y == 10'd180) ||
@@ -179,10 +183,10 @@ module waveform_renderer #(
     wire ch2_bar_hit = (!flash_view_enable) && wave_valid && in_span_1px(pix_y, ch2_top, ch2_bot);
     wire ch3_bar_hit = (!flash_view_enable) && wave_valid && in_span_1px(pix_y, ch3_top, ch3_bot);
     wire ch4_bar_hit = (!flash_view_enable) && wave_valid && in_span_1px(pix_y, ch4_top, ch4_bot);
-    wire pch1_bar_hit = wave_valid && in_span_1px(pix_y, pch1_top, pch1_bot);
-    wire pch2_bar_hit = (!flash_view_enable) && wave_valid && in_span_1px(pix_y, pch2_top, pch2_bot);
-    wire pch3_bar_hit = (!flash_view_enable) && wave_valid && in_span_1px(pix_y, pch3_top, pch3_bot);
-    wire pch4_bar_hit = (!flash_view_enable) && wave_valid && in_span_1px(pix_y, pch4_top, pch4_bot);
+    wire pch1_bar_hit = persistence_en && wave_valid && in_span_1px(pix_y, pch1_top, pch1_bot);
+    wire pch2_bar_hit = persistence_en && (!flash_view_enable) && wave_valid && in_span_1px(pix_y, pch2_top, pch2_bot);
+    wire pch3_bar_hit = persistence_en && (!flash_view_enable) && wave_valid && in_span_1px(pix_y, pch3_top, pch3_bot);
+    wire pch4_bar_hit = persistence_en && (!flash_view_enable) && wave_valid && in_span_1px(pix_y, pch4_top, pch4_bot);
 
     // Linear interpolation bridge: connect neighboring column centers for low-sample scenarios.
     reg       mid_prev_valid;
@@ -193,10 +197,10 @@ module waveform_renderer #(
     wire ch2_line_hit = (!flash_view_enable) && interp_en && in_span_1px(pix_y, ch2_mid_prev, ch2_mid_y);
     wire ch3_line_hit = (!flash_view_enable) && interp_en && in_span_1px(pix_y, ch3_mid_prev, ch3_mid_y);
     wire ch4_line_hit = (!flash_view_enable) && interp_en && in_span_1px(pix_y, ch4_mid_prev, ch4_mid_y);
-    wire pch1_line_hit = interp_en && in_span_1px(pix_y, pch1_mid_prev, pch1_mid_y);
-    wire pch2_line_hit = (!flash_view_enable) && interp_en && in_span_1px(pix_y, pch2_mid_prev, pch2_mid_y);
-    wire pch3_line_hit = (!flash_view_enable) && interp_en && in_span_1px(pix_y, pch3_mid_prev, pch3_mid_y);
-    wire pch4_line_hit = (!flash_view_enable) && interp_en && in_span_1px(pix_y, pch4_mid_prev, pch4_mid_y);
+    wire pch1_line_hit = persistence_en && interp_en && in_span_1px(pix_y, pch1_mid_prev, pch1_mid_y);
+    wire pch2_line_hit = persistence_en && (!flash_view_enable) && interp_en && in_span_1px(pix_y, pch2_mid_prev, pch2_mid_y);
+    wire pch3_line_hit = persistence_en && (!flash_view_enable) && interp_en && in_span_1px(pix_y, pch3_mid_prev, pch3_mid_y);
+    wire pch4_line_hit = persistence_en && (!flash_view_enable) && interp_en && in_span_1px(pix_y, pch4_mid_prev, pch4_mid_y);
 
     wire ch1_hit = ch1_bar_hit || ch1_line_hit;
     wire ch2_hit = ch2_bar_hit || ch2_line_hit;
