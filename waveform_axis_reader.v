@@ -1,10 +1,10 @@
 // -----------------------------------------------------------------------------
 // waveform_axis_reader
 // -----------------------------------------------------------------------------
-// Purpose:
-//   Optional reader that turns ping-pong BRAM samples into AXI4-Stream pixels.
-//   (Current top uses vga_stream_player directly; this module is kept for reuse.)
+// Optional utility module that converts BRAM waveform samples into a pixel-stream style
+// interface. Kept for reuse; current top-level path uses vga_stream_player directly.
 // -----------------------------------------------------------------------------
+
 module waveform_axis_reader #(
     parameter DATA_W   = 8,
     parameter ADDR_W   = 10,
@@ -14,19 +14,16 @@ module waveform_axis_reader #(
     input  wire                  clk_read,
     input  wire                  rst_n,
 
-    // Frame switch control from display timing domain
     input  wire                  disp_frame_start,
     input  wire                  frame_valid,
     input  wire [ADDR_W-1:0]     active_frame_start_addr,
 
-    // Ping-pong BRAM read port
     output reg  [ADDR_W-1:0]     raddr,
     input  wire [DATA_W-1:0]     rdata_ch1,
     input  wire [DATA_W-1:0]     rdata_ch2,
     input  wire [DATA_W-1:0]     rdata_ch3,
     input  wire [DATA_W-1:0]     rdata_ch4,
 
-    // AXI4-Stream master (video active area only)
     output wire                  m_axis_tvalid,
     input  wire                  m_axis_tready,
     output wire [31:0]           m_axis_tdata,
@@ -54,7 +51,7 @@ module waveform_axis_reader #(
             x_cnt                    <= 11'd0;
             y_cnt                    <= 10'd0;
         end else begin
-            // Lock frame source only on display frame boundary to avoid tearing.
+
             if (disp_frame_start) begin
                 x_cnt <= 11'd0;
                 y_cnt <= 10'd0;
@@ -76,7 +73,6 @@ module waveform_axis_reader #(
                         else
                             y_cnt <= y_cnt + 10'd1;
 
-                        // Park on x=0 sample so next line starts without bubble.
                         raddr <= frame_base_addr_latched;
                     end else begin
                         x_cnt <= x_cnt + 11'd1;

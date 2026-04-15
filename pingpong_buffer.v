@@ -1,20 +1,17 @@
 // -----------------------------------------------------------------------------
 // pingpong_buffer
 // -----------------------------------------------------------------------------
-// Purpose:
-//   Two-bank frame buffer crossing write (50 MHz) and read (25 MHz) domains.
-//   Guarantees:
-//   1) Display never switches bank in middle of a frame.
-//   2) Write side avoids writing active display bank.
-//   3) New frame commit is atomic (bank locked during one capture burst).
+// Architecture:
+// - Two-bank frame buffer with write domain at 50 MHz and read domain at 25 MHz.
+// - Write side commits completed frames; read side only switches active bank at frame boundary.
 //
-// Key Signals (English):
-//   - wr_bank_sel: next target bank when write side is idle.
-//   - capture_bank_wr: bank locked for current capture burst.
-//   - active_bank_rd: bank currently selected by VGA read side.
-//   - pending_bank_rd: latest committed bank waiting next frame boundary.
-//   - writing_active_bank: illegal condition detector (write targeting active bank).
+// State/handshake intent:
+// - capture_active_wr/capture_bank_wr lock one target bank during an ongoing capture burst.
+// - pending_bank_rd stores newest committed bank until rd_frame_done allows atomic switch.
+// - commit_inflight_wr blocks rearm until read side consumes the committed frame, preventing
+//   pending-bank overwrite before display handoff.
 // -----------------------------------------------------------------------------
+
 module pingpong_buffer #(
     parameter DATA_W = 8,
     parameter ADDR_W = 10,
@@ -23,7 +20,6 @@ module pingpong_buffer #(
     input  wire                  rst_n_write,
     input  wire                  rst_n_read,
 
-    // write side
     input  wire                  clk_write,
     input  wire [ADDR_W-1:0]     waddr,
     input  wire [DATA_W-1:0]     wdata_ch1,
@@ -31,7 +27,6 @@ module pingpong_buffer #(
     input  wire [DATA_W-1:0]     wdata_ch3,
     input  wire [DATA_W-1:0]     wdata_ch4,
 
-    // read side
     input  wire                  clk_read,
     input  wire [ADDR_W-1:0]     raddr,
     output reg  [DATA_W-1:0]     rdata_ch1,
@@ -39,7 +34,6 @@ module pingpong_buffer #(
     output reg  [DATA_W-1:0]     rdata_ch3,
     output reg  [DATA_W-1:0]     rdata_ch4,
 
-    // control
     input  wire                  capture_done,
     input  wire                  we,
     output reg                   frame_valid,
@@ -54,10 +48,8 @@ module pingpong_buffer #(
 
     wire [31:0] wdata_packed = {wdata_ch4, wdata_ch3, wdata_ch2, wdata_ch1};
 
-    // -------------------------------------------------------------------------
-    // Two-bank BRAM
-    // -------------------------------------------------------------------------
-    reg  wr_bank_sel; // 0: bank0, 1: bank1 (next capture target when idle)
+    // Idle write-bank preference (used only when a capture burst is not locked yet).
+    reg  wr_bank_sel;
     wire bank0_we_a;
     wire bank1_we_a;
 
@@ -85,7 +77,6 @@ module pingpong_buffer #(
                     bank1_mem[waddr] <= wdata_packed;
             end
 
-            // Model as synchronous read (1-cycle latency) to match stream prefetch pipeline.
             always @(posedge clk_read) begin
                 bank0_rdata_b_r <= bank0_mem[raddr];
                 bank1_rdata_b_r <= bank1_mem[raddr];
@@ -117,46 +108,58 @@ module pingpong_buffer #(
         end
     endgenerate
 
-    // -------------------------------------------------------------------------
-    // Write side: never write active display bank
-    // -------------------------------------------------------------------------
+    // Write-domain capture lock:
+    // - capture_active_wr: a capture burst is in progress
+    // - capture_bank_wr  : bank fixed for this burst from first write beat to capture_done
     reg capture_active_wr;
-    reg capture_bank_wr; // bank locked for current capture burst
+    reg capture_bank_wr;
     reg active_bank_rd;
     reg active_bank_sync1_wr, active_bank_sync2_wr;
     reg frame_valid_sync1_wr, frame_valid_sync2_wr;
+    // A committed frame exists but has not been consumed by read domain yet.
+    reg commit_inflight_wr;
 
     reg bank0_commit_tog_wr, bank1_commit_tog_wr;
     reg bank0_commit_req_wr, bank1_commit_req_wr;
     reg [ADDR_W-1:0] bank0_start_addr_wr, bank1_start_addr_wr;
     reg dbg_we_seen_wr, dbg_capdone_seen_wr, dbg_write_active_seen_wr, dbg_overrun_seen_wr;
     reg dbg_bank0_we_seen_wr, dbg_bank1_we_seen_wr;
+    // Read->write acknowledgment toggle synchronizer.
+    reg consume_tog_sync1_wr, consume_tog_sync2_wr, consume_tog_d_wr;
+    reg consume_tog_rd;
+    wire consume_pulse_wr = consume_tog_sync2_wr ^ consume_tog_d_wr;
 
     wire write_bank_sel = capture_active_wr ? capture_bank_wr : wr_bank_sel;
     wire safe_idle_bank_sel = frame_valid_sync2_wr ? ~active_bank_sync2_wr : wr_bank_sel;
     wire writing_active_bank = frame_valid_sync2_wr && (write_bank_sel == active_bank_sync2_wr);
     assign bank0_we_a = we && (write_bank_sel == 1'b0) && ~writing_active_bank;
     assign bank1_we_a = we && (write_bank_sel == 1'b1) && ~writing_active_bank;
-    // Keep sample_controller rearm path robust:
-    // ready only depends on whether a capture burst is currently in progress.
-    // Bank safety is enforced by write-bank lock + write gating, not by stalling rearm.
-    assign capture_ready = !capture_active_wr;
 
+    // Rearm is allowed only when:
+    // 1) current capture burst is fully finished, and
+    // 2) the last committed frame has already been consumed by display side.
+    assign capture_ready = !capture_active_wr && !commit_inflight_wr;
+
+    // Write-domain control FSM (capture lock + commit publication).
     always @(posedge clk_write or negedge rst_n_write) begin
         if (!rst_n_write) begin
-            wr_bank_sel               <= 1'b1; // start from bank1 to avoid reset default active=bank0
+            wr_bank_sel               <= 1'b1;
             capture_active_wr         <= 1'b0;
             capture_bank_wr           <= 1'b1;
             active_bank_sync1_wr      <= 1'b0;
             active_bank_sync2_wr      <= 1'b0;
             frame_valid_sync1_wr      <= 1'b0;
             frame_valid_sync2_wr      <= 1'b0;
+            commit_inflight_wr        <= 1'b0;
             bank0_commit_tog_wr       <= 1'b0;
             bank1_commit_tog_wr       <= 1'b0;
             bank0_commit_req_wr       <= 1'b0;
             bank1_commit_req_wr       <= 1'b0;
             bank0_start_addr_wr       <= {ADDR_W{1'b0}};
             bank1_start_addr_wr       <= {ADDR_W{1'b0}};
+            consume_tog_sync1_wr      <= 1'b0;
+            consume_tog_sync2_wr      <= 1'b0;
+            consume_tog_d_wr          <= 1'b0;
             dbg_we_seen_wr            <= 1'b0;
             dbg_capdone_seen_wr       <= 1'b0;
             dbg_write_active_seen_wr  <= 1'b0;
@@ -177,14 +180,18 @@ module pingpong_buffer #(
             if (writing_active_bank)
                 dbg_write_active_seen_wr <= 1'b1;
 
-            // Sync read-side active bank and frame_valid.
             active_bank_sync1_wr <= active_bank_rd;
             active_bank_sync2_wr <= active_bank_sync1_wr;
             frame_valid_sync1_wr <= frame_valid;
             frame_valid_sync2_wr <= frame_valid_sync1_wr;
+            consume_tog_sync1_wr <= consume_tog_rd;
+            consume_tog_sync2_wr <= consume_tog_sync1_wr;
+            consume_tog_d_wr     <= consume_tog_sync2_wr;
 
-            // Emit commit toggle one write-clock after metadata latch, so start_addr
-            // stays stable long enough for read-domain synchronizers.
+            // Read domain toggles consume_tog_rd when it accepts pending frame.
+            if (consume_pulse_wr)
+                commit_inflight_wr <= 1'b0;
+
             if (bank0_commit_req_wr) begin
                 bank0_commit_tog_wr <= ~bank0_commit_tog_wr;
                 bank0_commit_req_wr <= 1'b0;
@@ -194,24 +201,24 @@ module pingpong_buffer #(
                 bank1_commit_req_wr <= 1'b0;
             end
 
-            // Idle steering: always hold next target at non-active bank.
             if (!capture_active_wr && frame_valid_sync2_wr)
                 wr_bank_sel <= ~active_bank_sync2_wr;
 
-            // Lock target bank on first write beat of a capture burst.
             if (capture_done) begin
                 capture_active_wr <= 1'b0;
             end else if (!capture_active_wr && we) begin
+                // Lock target bank on first write of a new capture burst.
                 capture_active_wr <= 1'b1;
                 capture_bank_wr   <= safe_idle_bank_sel;
             end
 
             if (capture_done) begin
                 if (frame_valid_sync2_wr && (capture_bank_wr == active_bank_sync2_wr)) begin
-                    // Overrun: a capture ended on active display bank, drop this frame.
+
                     overflow <= 1'b1;
                     dbg_overrun_seen_wr <= 1'b1;
                 end else begin
+                    // Publish a new frame commit into read domain via toggle pulse.
                     if (capture_bank_wr == 1'b0) begin
                         bank0_start_addr_wr       <= frame_start_addr;
                         bank0_commit_req_wr       <= 1'b1;
@@ -219,18 +226,16 @@ module pingpong_buffer #(
                         bank1_start_addr_wr       <= frame_start_addr;
                         bank1_commit_req_wr       <= 1'b1;
                     end
+                    commit_inflight_wr <= 1'b1;
                 end
 
-                // Keep idle target steered by active bank; do not force blind toggle.
                 if (frame_valid_sync2_wr)
                     wr_bank_sel <= ~active_bank_sync2_wr;
             end
         end
     end
 
-    // -------------------------------------------------------------------------
-    // Read side: consume latest committed frame at frame boundary
-    // -------------------------------------------------------------------------
+    // Read-domain control FSM (pending queue + atomic frame-boundary bank switch).
     reg bank0_commit_sync1_rd, bank0_commit_sync2_rd, bank0_commit_sync2_d_rd;
     reg bank1_commit_sync1_rd, bank1_commit_sync2_rd, bank1_commit_sync2_d_rd;
     wire bank0_commit_pulse_rd = bank0_commit_sync2_rd ^ bank0_commit_sync2_d_rd;
@@ -264,6 +269,7 @@ module pingpong_buffer #(
             active_frame_start_addr       <= {ADDR_W{1'b0}};
             dbg_rd_switch_seen            <= 1'b0;
             dbg_commit_seen_rd            <= 1'b0;
+            consume_tog_rd                <= 1'b0;
         end else begin
             bank0_commit_sync1_rd   <= bank0_commit_tog_wr;
             bank0_commit_sync2_rd   <= bank0_commit_sync1_rd;
@@ -276,7 +282,6 @@ module pingpong_buffer #(
             bank1_start_sync1_rd    <= bank1_start_addr_wr;
             bank1_start_sync2_rd    <= bank1_start_sync1_rd;
 
-            // Keep only the newest completed frame pending.
             if (bank0_commit_pulse_rd) begin
                 pending_valid_rd      <= 1'b1;
                 pending_bank_rd       <= 1'b0;
@@ -291,26 +296,25 @@ module pingpong_buffer #(
             end
 
             if (!frame_valid && pending_valid_rd) begin
-                // First frame starts displaying immediately.
+                // First valid frame after reset can switch immediately.
                 active_bank_rd          <= pending_bank_rd;
                 active_frame_start_addr <= pending_start_addr_rd;
                 pending_valid_rd        <= 1'b0;
                 frame_valid             <= 1'b1;
                 dbg_rd_switch_seen      <= 1'b1;
+                consume_tog_rd          <= ~consume_tog_rd;
             end else if (rd_frame_done && pending_valid_rd) begin
-                // Switch only at display frame boundary.
+                // Normal path: only switch display source at frame boundary.
                 active_bank_rd          <= pending_bank_rd;
                 active_frame_start_addr <= pending_start_addr_rd;
                 pending_valid_rd        <= 1'b0;
                 frame_valid             <= 1'b1;
                 dbg_rd_switch_seen      <= 1'b1;
+                consume_tog_rd          <= ~consume_tog_rd;
             end
         end
     end
 
-    // -------------------------------------------------------------------------
-    // Read data mux
-    // -------------------------------------------------------------------------
     always @(posedge clk_read or negedge rst_n_read) begin
         if (!rst_n_read) begin
             rdata_ch1 <= 8'd127;
@@ -335,33 +339,12 @@ module pingpong_buffer #(
         end
     end
 
-    // Read-path taps (25m read domain, direct visibility):
-    // [0] bank0 raw read data has any non-zero bit
-    // [1] bank1 raw read data has any non-zero bit
-    // [2] currently selected active bank raw read data non-zero
-    // [3] registered muxed rdata_ch* output non-zero
     wire bank0_raw_nz = |bank0_rdata_b;
     wire bank1_raw_nz = |bank1_rdata_b;
     wire active_raw_nz = active_bank_rd ? bank1_raw_nz : bank0_raw_nz;
     wire muxed_reg_nz = |{rdata_ch4, rdata_ch3, rdata_ch2, rdata_ch1};
     assign dbg_read_tap = {muxed_reg_nz, active_raw_nz, bank1_raw_nz, bank0_raw_nz};
 
-    // [0] wr_bank_sel
-    // [1] active_bank_sync2_wr
-    // [2] writing_active_bank
-    // [3] capture_active_wr
-    // [4] bank0_commit_tog_wr
-    // [5] bank1_commit_tog_wr
-    // [6] active_bank_rd
-    // [7] pending_valid_rd
-    // [8] pending_bank_rd
-    // [9] frame_valid
-    // [10] we_seen_wr (sticky)
-    // [11] capture_done_seen_wr (sticky)
-    // [12] wrote_active_bank_seen_wr (sticky)
-    // [13] overrun_seen_wr (sticky)
-    // [14] bank0_we_a_seen_wr (sticky, real BRAM write hit)
-    // [15] bank1_we_a_seen_wr (sticky, real BRAM write hit)
     assign dbg_bus = {
         dbg_bank1_we_seen_wr,
         dbg_bank0_we_seen_wr,

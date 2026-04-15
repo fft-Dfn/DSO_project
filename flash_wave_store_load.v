@@ -1,22 +1,12 @@
 // -----------------------------------------------------------------------------
 // flash_wave_store_load
 // -----------------------------------------------------------------------------
-// Purpose:
-//   Stable flash waveform transaction backend (read clock domain).
-//   - STORE: capture one display frame (selected channel), then write 1024 bytes.
-//   - LOAD : read 1024 bytes from flash into local frame buffer.
-//
-// Transaction interface:
-//   req    : store_req / load_req
-//   ack    : flash_req_ack_pulse (accepted only when idle)
-//   busy   : flash_busy
-//   cancel : cancel_req -> flash_cancel_pulse
-//   timeout: watchdog -> flash_timeout_pulse
-//
-// Notes:
-//   - Flash path taps fetch stream only; it never back-pressures VGA.
-//   - A single BRAM-style frame buffer is used to reduce LUT pressure.
+// Transaction FSM intent:
+// - STORE: snapshot one selected channel from fetch stream -> trigger SPI write.
+// - LOAD : trigger SPI read -> populate view buffer -> expose flash_view_valid.
+// - Supports cancel/timeout/error signaling without back-pressuring VGA display path.
 // -----------------------------------------------------------------------------
+
 module flash_wave_store_load #(
     parameter integer ADDR_W = 10,
     parameter integer DATA_W = 8,
@@ -33,13 +23,11 @@ module flash_wave_store_load #(
     input  wire [1:0]            store_ch_sel,
     input  wire [1:0]            load_ch_sel,
 
-    // Latest frame sample stream (from vga_stream_player fetch engine).
     input  wire                  fetch_sample_valid,
     input  wire [ADDR_W-1:0]     fetch_sample_idx,
     input  wire [31:0]           fetch_sample_packed,
     input  wire                  fetch_frame_done,
 
-    // Loaded-waveform display readback path.
     input  wire [ADDR_W-1:0]     flash_view_addr,
     output reg  [DATA_W-1:0]     flash_view_sample,
     output reg                   flash_view_valid,
@@ -93,13 +81,17 @@ module flash_wave_store_load #(
         end
     endfunction
 
+    // frame_buf     : staging buffer for STORE write source and LOAD destination.
+    // flash_view_buf: stable readback buffer used by display flash-view path.
     (* ram_style = "block" *) reg [DATA_W-1:0] frame_buf      [0:SAMPLE_CNT-1];
     (* ram_style = "block" *) reg [DATA_W-1:0] flash_view_buf [0:SAMPLE_CNT-1];
 
+    // STORE front-end capture control.
     reg                  snap_active;
     reg                  snapshot_ready;
     reg [1:0]            snap_ch_sel;
 
+    // SPI transaction ownership.
     reg                  op_active;
     reg                  op_is_load;
 
@@ -126,15 +118,15 @@ module flash_wave_store_load #(
     wire                 spi_jedec_valid;
     reg                  jedec_probe_pending;
 
+    // Guards against stuck SPI operation.
     reg [31:0]           txn_watchdog_cnt;
 
     wire                 txn_active = snap_active || snapshot_ready || op_active || spi_busy;
-    // Timeout should guard only the SPI transaction phase, not frame-capture wait.
+
     wire                 watchdog_active = op_active || spi_busy;
     wire                 timeout_hit = watchdog_active && (txn_watchdog_cnt >= (TXN_TIMEOUT_CYCLES - 1));
     wire                 spi_rst_n = rst_n & ~spi_soft_reset;
 
-    // Canonical single write port for BRAM inference.
     wire                 frame_buf_we   = spi_out_data_we | snap_wr_en;
     wire [ADDR_W-1:0]    frame_buf_addr = spi_out_data_we ? spi_out_data_idx : snap_wr_addr;
     wire [DATA_W-1:0]    frame_buf_data = spi_out_data_we ? spi_out_data     : snap_wr_data;
@@ -142,6 +134,7 @@ module flash_wave_store_load #(
 
     assign flash_busy = txn_active;
 
+    // Memory datapath process.
     always @(posedge clk_25m) begin
         if (frame_buf_we)
             frame_buf[frame_buf_addr] <= frame_buf_data;
@@ -152,10 +145,13 @@ module flash_wave_store_load #(
         flash_view_addr_r  <= flash_view_addr;
         flash_view_sample  <= flash_view_buf[flash_view_addr_r];
 
-        // Keep this synchronous read style for stable memory inference.
         spi_in_data <= frame_buf[spi_in_data_idx];
     end
 
+    // Transaction control FSM:
+    // - accepts store/load requests when fully idle
+    // - executes cancel/timeout abort paths with highest priority
+    // - sequences snapshot capture and SPI request generation
     always @(posedge clk_25m or negedge rst_n) begin
         if (!rst_n) begin
             snap_active          <= 1'b0;
@@ -194,13 +190,12 @@ module flash_wave_store_load #(
             flash_cancel_pulse  <= 1'b0;
             flash_timeout_pulse <= 1'b0;
 
-            // Watchdog.
             if (!watchdog_active)
                 txn_watchdog_cnt <= 32'd0;
             else if (!timeout_hit)
                 txn_watchdog_cnt <= txn_watchdog_cnt + 1'b1;
 
-            // Cancel has the highest priority while busy.
+            // Priority 1: explicit cancel from UI.
             if (cancel_req && txn_active) begin
                 snap_active          <= 1'b0;
                 snapshot_ready       <= 1'b0;
@@ -211,7 +206,7 @@ module flash_wave_store_load #(
                 flash_error          <= 1'b0;
                 flash_active_is_load <= 1'b0;
             end else if (timeout_hit) begin
-                // Timeout abort path.
+                // Priority 2: watchdog timeout abort.
                 snap_active          <= 1'b0;
                 snapshot_ready       <= 1'b0;
                 op_active            <= 1'b0;
@@ -227,7 +222,7 @@ module flash_wave_store_load #(
                     flash_jedec_valid <= 1'b1;
                 end
 
-                // Accept new request only when transaction is fully idle.
+                // Optional one-shot JEDEC ID probe after reset.
                 if (!txn_active && jedec_probe_pending) begin
                     spi_id_req <= 1'b1;
                     jedec_probe_pending <= 1'b0;
@@ -252,7 +247,7 @@ module flash_wave_store_load #(
                     end
                 end
 
-                // Frame capture for STORE (selected single channel only).
+                // STORE path: capture selected channel from fetched frame stream.
                 if (snap_active && fetch_sample_valid) begin
                     snap_wr_en   <= 1'b1;
                     snap_wr_addr <= fetch_sample_idx;
@@ -264,7 +259,7 @@ module flash_wave_store_load #(
                     snapshot_ready <= 1'b1;
                 end
 
-                // Launch SPI write after snapshot completes.
+                // Launch STORE SPI write once full snapshot is available.
                 if (snapshot_ready && !op_active && !spi_busy) begin
                     op_active            <= 1'b1;
                     op_is_load           <= 1'b0;
@@ -275,7 +270,7 @@ module flash_wave_store_load #(
                     flash_error          <= 1'b0;
                 end
 
-                // SPI completion.
+                // Common completion path for both LOAD and STORE.
                 if (spi_done_pulse && op_active) begin
                     op_active        <= 1'b0;
                     flash_done_pulse <= 1'b1;
@@ -285,7 +280,6 @@ module flash_wave_store_load #(
                         snapshot_ready <= 1'b0;
                 end
 
-                // spi_error is not used as a UI error source to avoid false ERR latching.
             end
         end
     end

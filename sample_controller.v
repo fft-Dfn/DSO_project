@@ -1,26 +1,23 @@
 // -----------------------------------------------------------------------------
 // sample_controller
 // -----------------------------------------------------------------------------
-// Purpose:
-//   Capture 4 selected channels into a circular RAM window with trigger support.
+// State machine intent:
+// S_IDLE -> S_PREFILL -> S_ARMED -> S_POST -> S_IDLE
+// - S_PREFILL fills half-window pre-trigger history.
+// - S_ARMED continuously writes circular data while waiting for trigger edge or auto-timeout.
+// - S_POST captures the post-trigger tail and then emits capture_done for one frame commit.
 //
-// Capture Flow:
-//   S_IDLE    -> wait for rearm
-//   S_PREFILL -> fill pre-trigger half window
-//   S_ARMED   -> wait trigger edge (or auto-timeout force trigger)
-//   S_POST    -> capture post-trigger half window, then pulse capture_done
-//
-// Key Signals (English):
-//   - sample_tick: decimated sampling strobe from sample_div.
-//   - edge_fired: configured trigger edge condition met.
-//   - force_req: auto-mode timeout fallback trigger request.
-//   - last_trigger_timeout: 1 means latest trigger came from auto-timeout.
-//   - frame_start_addr: logical start of display window around trigger point.
+// Key registers:
+// - wr_ptr: circular write pointer into frame RAM.
+// - trig_addr: write address where trigger fired; used to derive frame_start_addr.
+// - post_cnt/prefill_cnt: per-phase sample counters.
+// - sample_tick: decimated sampling strobe derived from sample_div.
 // -----------------------------------------------------------------------------
+
 module sample_controller #(
     parameter DATA_W       = 8,
     parameter ADDR_W       = 10,
-    parameter AUTO_TIMEOUT = 32'd25_000_000 // half second at 50 MHz
+    parameter AUTO_TIMEOUT = 32'd25_000_000
 )(
     input  wire              clk,
     input  wire              rst_n,
@@ -56,9 +53,8 @@ module sample_controller #(
 
     localparam DEPTH      = (1 << ADDR_W);
     localparam HALF_DEPTH = (DEPTH >> 1);
-    // Post-trigger samples should be 511 (not 512) because trigger sample
-    // itself is already written in S_ARMED when edge_fired.
-    // This prevents overwriting frame_start_addr (trig_addr - HALF_DEPTH).
+    // Trigger sample is already written in S_ARMED when edge_fired/force_req happens,
+    // so post-trigger tail must be HALF_DEPTH-1 samples (counter reaches HALF_DEPTH-2).
     localparam POST_COUNT = HALF_DEPTH - 2;
 
     localparam S_IDLE    = 2'd0;
@@ -91,16 +87,17 @@ module sample_controller #(
     reg [31:0] sample_div_latched;
     reg        sample_tick;
     wire [31:0] sample_div_eff = (sample_div <= 32'd1) ? 32'd1 : sample_div;
+
+    // Sample strobe generator:
+    // - restarts phase immediately when sample_div changes
+    // - emits one-cycle sample_tick pulse at configured decimation ratio
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             div_cnt     <= 32'd0;
             sample_div_latched <= 32'd1;
             sample_tick <= 1'b0;
         end else begin
-            // Robust divider update:
-            // 1) If sample_div changes, restart phase immediately.
-            // 2) Use >= compare to avoid long stall when new divider is smaller
-            //    than current div_cnt (prevents wraparound wait).
+
             if (sample_div_eff != sample_div_latched) begin
                 sample_div_latched <= sample_div_eff;
                 div_cnt            <= 32'd0;
@@ -157,6 +154,11 @@ module sample_controller #(
     reg [ADDR_W-1:0] post_cnt;
     reg [ADDR_W-1:0] prefill_cnt;
 
+    // Main capture FSM:
+    // S_IDLE    : wait for rearm from frame buffer side
+    // S_PREFILL : collect half-window history before trigger point
+    // S_ARMED   : keep writing circular data until trigger edge or auto timeout
+    // S_POST    : collect post-trigger tail, then publish capture_done/frame_start_addr
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state            <= S_IDLE;
@@ -181,6 +183,7 @@ module sample_controller #(
 
             case (state)
                 S_IDLE: begin
+                    // Reset phase-local counters and wait for explicit rearm.
                     wr_ptr      <= {ADDR_W{1'b0}};
                     prefill_cnt <= {ADDR_W{1'b0}};
                     post_cnt    <= {ADDR_W{1'b0}};
@@ -192,6 +195,7 @@ module sample_controller #(
                 end
 
                 S_PREFILL: begin
+                    // Build the pre-trigger half-window.
                     if (tick_d1) begin
                         ram_we        <= 1'b1;
                         ram_waddr     <= wr_ptr;
@@ -212,6 +216,7 @@ module sample_controller #(
                 end
 
                 S_ARMED: begin
+                    // In AUTO mode, if no edge arrives in time, force trigger.
                     if (trig_mode == 1'b1) begin
                         if (!force_req) begin
                             if (auto_cnt < AUTO_TIMEOUT)
@@ -251,6 +256,7 @@ module sample_controller #(
                 end
 
                 S_POST: begin
+                    // Complete post-trigger tail, then close this capture frame atomically.
                     if (tick_d1) begin
                         ram_we        <= 1'b1;
                         ram_waddr     <= wr_ptr;

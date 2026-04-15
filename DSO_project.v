@@ -1,22 +1,14 @@
 // -----------------------------------------------------------------------------
-// DSO_project (Top)
+// DSO_project (Top-Level Integration)
 // -----------------------------------------------------------------------------
-// Purpose:
-//   Top-level integration of the digital storage oscilloscope pipeline.
-//   Key path: DDS sources -> sample_controller -> pingpong_buffer -> VGA stream.
-//
-// Clock Domains:
-//   - clk_50m: control, DDS, sampling, write-side RAM.
-//   - clk_25m: VGA timing, read-side RAM, renderer.
-//
-// Key Signals (English):
-//   - capture_done: one capture frame has finished writing.
-//   - capture_ready: sampling engine may start the next capture.
-//   - frame_valid: read side currently has at least one committed frame.
-//   - rd_frame_done: VGA consumed one full display frame.
-//   - active_frame_start_addr: base address used by current display frame.
-//   - dbg_status[65:0]: in-screen debug bus.
+// Role:
+// 1) Integrates HMI, waveform generation, sampling/trigger, ping-pong buffering,
+//    VGA display pipeline, EEPROM parameter persistence, and SPI flash store/load.
+// 2) Splits logic into two clock domains (50 MHz control/write, 25 MHz display/read)
+//    and performs explicit CDC synchronization for control/status handshakes.
+// 3) Provides consolidated debug status bits that expose frame handoff and data flow.
 // -----------------------------------------------------------------------------
+
 module DSO_project (
     input  wire        clk_50m,
     input  wire        clk_25m,
@@ -34,20 +26,19 @@ module DSO_project (
     output wire [4:0]  vga_r,
     output wire [5:0]  vga_g,
     output wire [4:0]  vga_b,
-    
-    // EEPROM I2C pins (Efinix split inout style).
+
     input  wire                  sda_eeprom_IN,
     output wire                  sda_eeprom_OUT,
     output wire                  sda_eeprom_OE,
     output wire                  scl_eeprom,
 
-    // SPI flash pins (W25Q32JV).
     output wire                  flash_cs_n,
     output wire                  flash_sck,
     output wire                  flash_mosi,
     input  wire                  flash_miso
 );
-// Physical key debouncing.
+
+    // Physical active-low keys -> debounced clean levels.
     wire [4:0] raw_keys = {sys_rst_n, key_up_n, key_down_n, key_enter_n, key_back_n};
     wire [4:0] clean_keys;
     key_debouncer #(
@@ -59,8 +50,6 @@ module DSO_project (
         .key_clean(clean_keys)
     );
 
-    
- 
     wire clean_rst_n       = clean_keys[4];
     wire base_rst_n;
     reg  [1:0] rst50_sync = 2'b00;
@@ -72,8 +61,7 @@ module DSO_project (
     wire clean_key_enter_n = clean_keys[1];
     wire clean_key_back_n  = clean_keys[0];
 
-    // Power-on reset stretcher:
-    // ensure every core FSM sees a guaranteed low-reset window after PLL lock.
+    // Power-on reset stretcher in 50 MHz domain.
     reg [15:0] por_cnt_50 = 16'd0;
     reg        por_done_50 = 1'b0;
     always @(posedge clk_50m or negedge clean_rst_n) begin
@@ -92,7 +80,7 @@ module DSO_project (
 
     assign base_rst_n = clean_rst_n & pll_locked & por_done_50;
 
-    // Per-domain reset synchronizers: async assert, sync release.
+    // Per-domain reset synchronizers (async assert, sync release).
     always @(posedge clk_50m or negedge base_rst_n) begin
         if (!base_rst_n)
             rst50_sync <= 2'b00;
@@ -109,8 +97,8 @@ module DSO_project (
 
     assign rst_n_50 = rst50_sync[1];
     assign rst_n_25 = rst25_sync[1];
-    
-// Key edge detection (active-low key press -> one-cycle pulse).
+
+    // Edge detection for key press pulses.
     reg [3:0] key_d0, key_d1;
     always @(posedge clk_50m or negedge rst_n_50) begin
         if (!rst_n_50) begin
@@ -127,16 +115,15 @@ module DSO_project (
     wire key_enter_p = ~key_d0[1] & key_d1[1];
     wire key_back_p  = ~key_d0[0] & key_d1[0];
 
-// HMI / configuration control.
     wire [31:0] dds_freq_a, dds_freq_b, dds_freq_c, dds_freq_d, dds_freq_e;
     wire [1:0]  dds_type_a, dds_type_b, dds_type_c, dds_type_d, dds_type_e;
     wire [7:0]  dds_phase_a, dds_phase_b, dds_phase_c, dds_phase_d, dds_phase_e;
-    
+
     wire [2:0]  sel_trig, sel_ch1, sel_ch2, sel_ch3, sel_ch4;
     wire        trig_mode, trig_edge;
     wire [7:0]  trig_level;
     wire [31:0] sample_div;
-    
+
     wire        flash_write_req, flash_read_req, flash_cancel_req;
     wire [1:0]  flash_ch_sel;
     wire        flash_txn_busy_50;
@@ -160,7 +147,7 @@ module DSO_project (
     wire [3:0]  ui_curr_edit_value;
     wire [2:0]  ui_active_src_sel;
 
-    // Flash request CDC (50m -> 25m)
+    // Request toggle CDC (50m -> 25m) for flash actions.
     reg         flash_wr_tog_50, flash_rd_tog_50, flash_cancel_tog_50;
     reg [1:0]   flash_wr_ch_50, flash_rd_ch_50;
     reg         flash_wr_tog_sync1_25, flash_wr_tog_sync2_25, flash_wr_tog_d_25;
@@ -175,7 +162,7 @@ module DSO_project (
     wire [1:0]  flash_load_ch_25;
     reg         flash_busy_sync1_50, flash_busy_sync2_50;
 
-    // Flash request toggle CDC.
+    // Emit request toggles in control domain.
     always @(posedge clk_50m or negedge rst_n_50) begin
         if (!rst_n_50) begin
             flash_wr_tog_50 <= 1'b0;
@@ -197,6 +184,7 @@ module DSO_project (
         end
     end
 
+    // Synchronize request toggles and payload selectors into display domain.
     always @(posedge clk_25m or negedge rst_n_25) begin
         if (!rst_n_25) begin
             flash_wr_tog_sync1_25 <= 1'b0;
@@ -235,7 +223,7 @@ module DSO_project (
     assign flash_store_ch_25  = flash_wr_ch_sync2_25;
     assign flash_load_ch_25   = flash_rd_ch_sync2_25;
 
-    // Flash busy sync (25m -> 50m) for HMI request arbitration.
+    // Busy status sync (25m -> 50m) for HMI-side arbitration.
     always @(posedge clk_50m or negedge rst_n_50) begin
         if (!rst_n_50) begin
             flash_busy_sync1_50 <= 1'b0;
@@ -246,8 +234,6 @@ module DSO_project (
         end
     end
     assign flash_txn_busy_50 = flash_busy_sync2_50;
-
-
 
     hmi_controller u_hmi_controller (
         .clk_50m        (clk_50m),
@@ -283,8 +269,7 @@ module DSO_project (
         .trig_edge      (trig_edge),
         .trig_level     (trig_level),
         .sample_div     (sample_div),
-       
-        
+
         .flash_write_req(flash_write_req),
         .flash_ch_sel   (flash_ch_sel),
         .flash_read_req (flash_read_req),
@@ -303,9 +288,6 @@ module DSO_project (
         .persist_save_req   (persist_save_req)
     );
 
-    // Automatic parameter persistence:
-    // - read once from EEPROM at power-up
-    // - write back after each parameter commit
     at24c01c_param_persist u_at24c01c_param_persist (
         .clk_50m        (clk_50m),
         .rst_n          (rst_n_50),
@@ -321,16 +303,13 @@ module DSO_project (
         .sda_oe         (sda_eeprom_OE)
     );
 
-
-
-// DDS waveform generators.
     wire [7:0] sig_a, sig_b, sig_c, sig_d, sig_e;
     dds_generator u_dds_a (.clk(clk_50m), .rst_n(rst_n_50), .freq_word(dds_freq_a), .phase_offset(dds_phase_a), .wave_type(dds_type_a), .wave_data(sig_a));
     dds_generator u_dds_b (.clk(clk_50m), .rst_n(rst_n_50), .freq_word(dds_freq_b), .phase_offset(dds_phase_b), .wave_type(dds_type_b), .wave_data(sig_b));
     dds_generator u_dds_c (.clk(clk_50m), .rst_n(rst_n_50), .freq_word(dds_freq_c), .phase_offset(dds_phase_c), .wave_type(dds_type_c), .wave_data(sig_c));
     dds_generator u_dds_d (.clk(clk_50m), .rst_n(rst_n_50), .freq_word(dds_freq_d), .phase_offset(dds_phase_d), .wave_type(dds_type_d), .wave_data(sig_d));
     dds_generator u_dds_e (.clk(clk_50m), .rst_n(rst_n_50), .freq_word(dds_freq_e), .phase_offset(dds_phase_e), .wave_type(dds_type_e), .wave_data(sig_e));
-// Sampling controller.
+
     wire              ram_we;
     wire [9:0]        ram_waddr;
     wire [7:0]        ram_wdata_ch1, ram_wdata_ch2, ram_wdata_ch3, ram_wdata_ch4;
@@ -364,16 +343,14 @@ module DSO_project (
         .frame_start_addr(frame_start_addr),
         .ram_we          (ram_we),
         .last_trigger_timeout(last_trigger_timeout_50),
-        
+
         .ram_waddr       (ram_waddr),
         .ram_wdata_ch1   (ram_wdata_ch1),
         .ram_wdata_ch2   (ram_wdata_ch2),
         .ram_wdata_ch3   (ram_wdata_ch3),
         .ram_wdata_ch4   (ram_wdata_ch4)
     );
-   
-    // Ping-pong frame buffer.
-    //wire [9:0] vga_wave_phys_raddr = active_frame_start_addr + vga_wave_logical_raddr;
+
     wire [9:0] active_frame_start_addr;
     wire       frame_valid;
     wire [7:0] vga_rdata_ch1, vga_rdata_ch2, vga_rdata_ch3, vga_rdata_ch4;
@@ -398,8 +375,6 @@ module DSO_project (
     reg  [22:0] flash_timeout_hold_25;
     reg         flash_view_enable_25;
     reg         flash_load_start_req_25;
-    
-
 
     pingpong_buffer u_pingpong_buffer (
         .rst_n_write             (rst_n_50),
@@ -421,7 +396,7 @@ module DSO_project (
 
         .capture_done            (capture_done),
         .we                      (ram_we),
-        .rd_frame_done    (rd_frame_done),    // read-domain pulse: one display frame consumed
+        .rd_frame_done    (rd_frame_done),
         .overflow          (overflow),
         .frame_start_addr     (frame_start_addr),
         .active_frame_start_addr     (active_frame_start_addr),
@@ -429,59 +404,9 @@ module DSO_project (
         .frame_valid      (frame_valid),
         .dbg_bus          (pp_dbg_bus),
         .dbg_read_tap     (pp_read_tap)
-        
 
     );
 
-    // In-screen debug status (66 bits, no external debug pins required):
-    // [0]   rst_n_25
-    // [1]   rst_n_50 synced into 25m domain
-    // [2]   capture_ready synced into 25m domain
-    // [3]   frame_valid
-    // [4]   overflow synced into 25m domain
-    // [5]   rd_frame_done seen since reset
-    // [6]   non-zero sample seen since reset
-    // [7]   recent capture_done pulse (stretched in 25m domain)
-    // [8]   wr_bank_sel
-    // [9]   active_bank_sync2_wr
-    // [10]  writing_active_bank
-    // [11]  capture_active_wr
-    // [12]  bank0_commit_tog_wr
-    // [13]  bank1_commit_tog_wr
-    // [14]  active_bank_rd
-    // [15]  pending_valid_rd
-    // [16]  pending_bank_rd
-    // [17]  frame_valid (from pingpong read domain)
-    // [18]  we_seen_wr (sticky)
-    // [19]  capture_done_seen_wr (sticky)
-    // [20]  wrote_active_bank_seen_wr (sticky)
-    // [21]  overrun_seen_wr (sticky)
-    // [22]  bank0_we_a_seen_wr (sticky, real BRAM write hit)
-    // [23]  bank1_we_a_seen_wr (sticky, real BRAM write hit)
-    // [24]  (vga_rdata_ch1 != 0)
-    // [25]  (vga_rdata_ch2 != 0)
-    // [26]  (vga_rdata_ch3 != 0)
-    // [27]  (vga_rdata_ch4 != 0)
-    // [28]  (ram_we && ram_wdata_ch1 != 0), synced to 25m
-    // [29]  (ram_we && ram_wdata_ch2 != 0), synced to 25m
-    // [30]  (ram_we && ram_wdata_ch3 != 0), synced to 25m
-    // [31]  (ram_we && ram_wdata_ch4 != 0), synced to 25m
-    // [32]  active_bank_rd live mirror (from pp bit6)
-    // [33]  pending_valid_rd live mirror (from pp bit7)
-    // [34]  rd_frame_done pulse (real-time)
-    // [35]  raddr changed this cycle (real-time)
-    // [36]  raddr_changed_seen since reset (sticky)
-    // [37]  raddr_wrap_seen since reset (sticky)
-    // [38]  (vga_raddr != 0)
-    // [39]  (active_frame_start_addr != 0)
-    // [40..49] vga_raddr[9:0] (real-time)
-    // [50..59] active_frame_start_addr[9:0] (real-time)
-    // [60]  bank0 raw read data non-zero (from pingpong bank0_rdata_b)
-    // [61]  bank1 raw read data non-zero (from pingpong bank1_rdata_b)
-    // [62]  active_bank raw read data non-zero
-    // [63]  final muxed rdata_ch* non-zero
-    // [64]  last trigger type is normal-edge trigger (N block)
-    // [65]  last trigger type is auto-timeout trigger (T block)
     reg capdone_tog_50;
     always @(posedge clk_50m or negedge rst_n_50) begin
         if (!rst_n_50)
@@ -612,9 +537,6 @@ module DSO_project (
         dbg_status_base
     };
 
-    // LOAD key behavior:
-    // - if currently viewing stored waveform and flash is idle: toggle view off
-    // - otherwise: start a LOAD transaction
     always @(posedge clk_25m or negedge rst_n_25) begin
         if (!rst_n_25) begin
             flash_view_enable_25   <= 1'b0;
@@ -634,8 +556,6 @@ module DSO_project (
         end
     end
 
-    // Flash UI state (left-bottom status line):
-    // 0 idle, 1 saving, 2 loading, 3 done, 4 cancel, 5 timeout, 7 view
     always @(posedge clk_25m or negedge rst_n_25) begin
         if (!rst_n_25) begin
             flash_done_hold_25    <= 23'd0;
@@ -667,7 +587,6 @@ module DSO_project (
         (flash_done_hold_25 != 23'd0)     ? 3'd3 :
                                             3'd0;
 
-    // Flash waveform store/load backend (fixed per-channel sectors).
     flash_wave_store_load u_flash_wave_store_load (
         .clk_25m            (clk_25m),
         .rst_n              (rst_n_25),
@@ -703,9 +622,9 @@ module DSO_project (
    assign vga_r     = rgb_565[15:11];
    assign vga_g     = rgb_565[10:5];
    assign vga_b     = rgb_565[4:0];
-   
-    VGA_top u_VGA_top(/*AUTOINST*/
-		      // Outputs
+
+    VGA_top u_VGA_top(
+
 		      .raddr		(vga_raddr),
 		      .rd_frame_done	(rd_frame_done),
 		      .fetch_sample_valid(fetch_sample_valid_25),
@@ -716,7 +635,7 @@ module DSO_project (
 		      .hsync		(vga_hs),
 		      .vsync		(vga_vs),
 		      .rgb565		(rgb_565),
-		      // Inputs
+
 		      .clk_25m		(clk_25m),
 		      .rst_n		(rst_n_25),
 		      .frame_valid	(frame_valid),
@@ -743,5 +662,5 @@ module DSO_project (
 		      .flash_jedec_id   (flash_jedec_id_25),
 		      .flash_jedec_valid(flash_jedec_valid_25)
           );
-   
+
 endmodule

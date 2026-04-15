@@ -1,10 +1,10 @@
 // -----------------------------------------------------------------------------
 // VGA_top
 // -----------------------------------------------------------------------------
-// Purpose:
-//   Thin wrapper around vga_stream_player.
-//   Keeps the external VGA-facing interface stable.
+// Thin wrapper that keeps external VGA-facing ports stable while delegating
+// frame fetch, cacheing, and rendering to vga_stream_player.
 // -----------------------------------------------------------------------------
+
 module VGA_top #(
     parameter DATA_W   = 8,
     parameter ADDR_W   = 10,
@@ -14,7 +14,6 @@ module VGA_top #(
     input  wire                  clk_25m,
     input  wire                  rst_n,
 
-    // Inputs from pingpong_buffer read path.
     input  wire                  frame_valid,
     input  wire [ADDR_W-1:0]     active_frame_start_addr,
     output wire [ADDR_W-1:0]     raddr,
@@ -46,12 +45,9 @@ module VGA_top #(
     output wire [31:0]           fetch_sample_packed,
     output wire                  fetch_frame_done,
 
-    // VGA outputs.
     output wire                  hsync,
     output wire                  vsync,
     output wire [15:0]           rgb565
-
-
 
 );
 

@@ -1,11 +1,17 @@
 // -----------------------------------------------------------------------------
 // vga_stream_player
 // -----------------------------------------------------------------------------
-// Purpose:
-//   1) Build 1024-sample -> 512-column min/max cache in read clock domain.
-//   2) Feed renderer with one min/max column per active waveform pixel.
-//   3) Keep one previous-frame cache for low-cost digital persistence.
+// Data path summary:
+// 1) Per display frame, fetches 1024 samples from active frame source.
+// 2) Pairs two adjacent samples into one min/max column (512 columns).
+// 3) Writes columns into fill cache bank and swaps cache banks only on frame boundary.
+//
+// Timing-critical notes:
+// - fetch_req_idx_d1/d2/d3 form a response-tag pipeline that aligns sample indices to data.
+// - live path and flash-view path use different effective latencies and therefore different tags.
+// - This alignment avoids odd/even pair corruption and visible seam drift.
 // -----------------------------------------------------------------------------
+
 module vga_stream_player #(
     parameter DATA_W   = 8,
     parameter ADDR_W   = 10,
@@ -15,7 +21,6 @@ module vga_stream_player #(
     input  wire                  clk_25m,
     input  wire                  rst_n,
 
-    // Frame source (from pingpong_buffer)
     input  wire                  frame_valid,
     input  wire [ADDR_W-1:0]     active_frame_start_addr,
     output reg  [ADDR_W-1:0]     raddr,
@@ -26,7 +31,6 @@ module vga_stream_player #(
 
     input  wire [65:0]           dbg_status,
 
-    // UI/control signals for renderer
     input  wire [3:0]            ui_page,
     input  wire [3:0]            ui_cursor,
     input  wire                  ui_curr_edit_mode,
@@ -58,7 +62,7 @@ module vga_stream_player #(
 
     localparam UI_W       = 11'd128;
     localparam WAVE_W     = 11'd512;
-    localparam SAMPLE_CNT = (1 << ADDR_W); // 1024
+    localparam SAMPLE_CNT = (1 << ADDR_W);
 
     wire         de_timing;
     wire [10:0]  pix_x_timing;
@@ -68,18 +72,17 @@ module vga_stream_player #(
     reg [10:0]   pix_x_d1;
     reg [9:0]    pix_y_d1;
 
-    // AXIS-like stream for renderer: one beat = one wave column min/max (4 channels packed).
     reg          axis_tvalid_d1;
     reg [63:0]   axis_tdata_d1;
     reg [63:0]   axis_tprev_d1;
     reg          axis_tlast_d1;
     reg          axis_tuser_d1;
 
+    // Base address frozen per display frame to keep a stable read window.
     reg [ADDR_W-1:0] frame_base_addr_latched;
 
-    // Two cache banks for atomic per-frame swap.
-    // Packed layout per column:
-    // {ch4_max,ch4_min,ch3_max,ch3_min,ch2_max,ch2_min,ch1_max,ch1_min}
+    // cache0/cache1: ping-pong min/max column caches for current rendering.
+    // persist_cache: previous-frame copy for persistence overlay.
     (* ram_style = "block" *) reg [63:0] minmax_cache0 [0:WAVE_W-1];
     (* ram_style = "block" *) reg [63:0] minmax_cache1 [0:WAVE_W-1];
     (* ram_style = "block" *) reg [63:0] persist_cache [0:WAVE_W-1];
@@ -94,14 +97,13 @@ module vga_stream_player #(
     reg [63:0] cache1_rd_data;
     reg [63:0] prev_cache_rd_data;
 
-    // Previous-frame cache copy engine.
     reg        persist_copy_active;
-    reg        persist_copy_src_sel;   // 0: cache0, 1: cache1
+    reg        persist_copy_src_sel;
     reg [8:0]  persist_copy_req_idx;
     reg        persist_copy_resp_valid;
     reg [8:0]  persist_copy_resp_idx;
 
-    // Fetch engine (reads 1024 samples from BRAM port B every display frame).
+    // Fetch-side request generator and response tag pipeline.
     reg                  fetching;
     reg [10:0]           fetch_req_idx;
     reg [ADDR_W-1:0]     fetch_base_addr;
@@ -109,6 +111,8 @@ module vga_stream_player #(
     reg [10:0]           fetch_req_idx_d1;
     reg                  fetch_req_valid_d2;
     reg [10:0]           fetch_req_idx_d2;
+    reg                  fetch_req_valid_d3;
+    reg [10:0]           fetch_req_idx_d3;
     reg                  fetch_use_flash_view;
     reg [31:0]           sample_even_hold;
     reg                  fetch_start_pending;
@@ -118,11 +122,12 @@ module vga_stream_player #(
     wire [31:0] sample_packed_view = {24'd0, flash_view_sample};
     wire [31:0] sample_packed_fetch =
         (flash_view_enable && flash_view_valid) ? sample_packed_view : sample_packed_live;
-    // Read-latency aligned response tag:
-    // - live pingpong read path: 2-cycle effective latency
-    // - flash view path:         1-cycle latency
-    wire fetch_resp_valid_now = fetch_use_flash_view ? fetch_req_valid_d1 : fetch_req_valid_d2;
-    wire [10:0] fetch_resp_idx_now = fetch_use_flash_view ? fetch_req_idx_d1 : fetch_req_idx_d2;
+
+    // Response tag selection:
+    // - live ping-pong BRAM path: use d3
+    // - flash view path         : use d2
+    wire fetch_resp_valid_now = fetch_use_flash_view ? fetch_req_valid_d2 : fetch_req_valid_d3;
+    wire [10:0] fetch_resp_idx_now = fetch_use_flash_view ? fetch_req_idx_d2 : fetch_req_idx_d3;
     wire cache_write_fire = fetch_resp_valid_now && fetch_resp_idx_now[0];
     wire [8:0] cache_write_addr = fetch_resp_idx_now[9:1];
     wire [63:0] cache_write_data = pack_minmax_pair(sample_even_hold, sample_packed_fetch);
@@ -184,10 +189,7 @@ module vga_stream_player #(
 
     reg in_wave_area_d1;
 
-    // Cache memories:
-    // - cache0/cache1: ping-pong min/max frame caches.
-    // - persist_cache: previous-frame cache for digital persistence.
-    // All ports are synchronous to keep BRAM inference stable.
+    // Synchronous cache read/write block.
     always @(posedge clk_25m) begin
         if (in_wave_area_timing) begin
             cache0_rd_addr     <= wave_col_idx_timing;
@@ -199,7 +201,6 @@ module vga_stream_player #(
             prev_cache_rd_addr <= 9'd0;
         end
 
-        // Copy source override: use the inactive cache read port for persistence copy.
         if (persist_copy_active) begin
             if (persist_copy_src_sel)
                 cache1_rd_addr <= persist_copy_req_idx;
@@ -231,7 +232,10 @@ module vga_stream_player #(
         .frame_start(frame_start)
     );
 
-    // Fetch + cache FSM.
+    // Fetch/cache control FSM:
+    // - launches one read request per cycle while fetching
+    // - consumes aligned responses into min/max cache
+    // - swaps active/fill cache only on frame_start after fill_done
     always @(posedge clk_25m or negedge rst_n) begin
         if (!rst_n) begin
             frame_base_addr_latched <= {ADDR_W{1'b0}};
@@ -248,6 +252,8 @@ module vga_stream_player #(
             fetch_req_idx_d1        <= 11'd0;
             fetch_req_valid_d2      <= 1'b0;
             fetch_req_idx_d2        <= 11'd0;
+            fetch_req_valid_d3      <= 1'b0;
+            fetch_req_idx_d3        <= 11'd0;
             fetch_use_flash_view    <= 1'b0;
             sample_even_hold        <= 32'd0;
             fetch_start_pending     <= 1'b0;
@@ -265,7 +271,7 @@ module vga_stream_player #(
             fetch_sample_valid <= 1'b0;
             fetch_frame_done   <= 1'b0;
             persist_copy_resp_valid <= 1'b0;
-            // Consume latency-aligned fetch response.
+
             if (fetch_resp_valid_now) begin
                 fetch_sample_valid  <= 1'b1;
                 fetch_sample_idx    <= fetch_resp_idx_now[ADDR_W-1:0];
@@ -281,22 +287,19 @@ module vga_stream_player #(
                 end
             end
 
-            // Request-index pipeline for response alignment.
+            // Shift request tags so response index matches data arrival latency.
+            fetch_req_valid_d3 <= fetch_req_valid_d2;
+            fetch_req_idx_d3   <= fetch_req_idx_d2;
             fetch_req_valid_d2 <= fetch_req_valid_d1;
             fetch_req_idx_d2   <= fetch_req_idx_d1;
             fetch_req_valid_d1 <= 1'b0;
             fetch_req_idx_d1   <= 11'd0;
 
-            // Frame boundary:
-            // 1) swap cache bank if previous fill finished
-            // 2) latch new frame base
-            // 3) start filling next cache bank
             if (frame_start) begin
                 frame_base_addr_latched <= active_frame_start_addr;
 
                 if (fill_done) begin
-                    // Snapshot old active cache into persistence cache.
-                    // "active_cache_sel" is still the old active bank in this cycle.
+                    // Snapshot previous active cache for persistence before switching.
                     persist_copy_active   <= 1'b1;
                     persist_copy_src_sel  <= active_cache_sel;
                     persist_copy_req_idx  <= 9'd0;
@@ -308,8 +311,7 @@ module vga_stream_player #(
                 end
 
                 if (frame_source_valid) begin
-                    // Delay fetch start until persistence copy is done to avoid
-                    // reading old frame data while it is being overwritten.
+                    // Delay fetch launch until persistence copy is idle to avoid port conflict.
                     fetch_start_pending   <= 1'b1;
                     fetch_start_base_addr <= flash_view_enable ? {ADDR_W{1'b0}} : active_frame_start_addr;
                 end else begin
@@ -318,7 +320,6 @@ module vga_stream_player #(
                 end
             end
 
-            // Launch one read request per clock while fetching.
             if (fetching) begin
                 raddr            <= fetch_base_addr + fetch_req_idx[ADDR_W-1:0];
                 flash_view_addr  <= fetch_req_idx[ADDR_W-1:0];
@@ -335,7 +336,7 @@ module vga_stream_player #(
                 flash_view_addr <= {ADDR_W{1'b0}};
             end
 
-            // Copy 512 columns from old active cache into persistence cache.
+            // One column copy per cycle from old active cache to persistence cache.
             if (persist_copy_active) begin
                 persist_copy_resp_valid <= 1'b1;
                 persist_copy_resp_idx   <= persist_copy_req_idx;
@@ -356,7 +357,7 @@ module vga_stream_player #(
         end
     end
 
-    // Timing + renderer stream pipeline.
+    // Timing-aligned stream output for renderer.
     always @(posedge clk_25m or negedge rst_n) begin
         if (!rst_n) begin
             de_d1          <= 1'b0;

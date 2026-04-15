@@ -1,13 +1,12 @@
 // -----------------------------------------------------------------------------
-// waveform_renderer
+// waveform_render
 // -----------------------------------------------------------------------------
-// Purpose:
-//   - Left panel (128x480): simple UI buttons + real-time sampled parameters.
-//   - Right panel (512x480): oscilloscope waveform using min/max vertical bars.
-//   - Digital persistence: previous-frame trace rendered in dim color.
-//   - Linear interpolation: connect neighbor column centers for smoother low-rate view.
-//   - Debug matrix kept (size unchanged) and moved to top-right.
+// Rendering model:
+// - Left panel: text/buttons/status UI.
+// - Right panel: waveform area with grid, center lines, per-channel traces, optional persistence.
+// - Uses min/max bars plus center-line interpolation for visually continuous traces.
 // -----------------------------------------------------------------------------
+
 module waveform_renderer #(
     parameter H_ACTIVE = 640,
     parameter V_ACTIVE = 480
@@ -17,17 +16,15 @@ module waveform_renderer #(
     input  wire [10:0]  pix_x,
     input  wire [9:0]   pix_y,
 
-    // AXI4-Stream-like waveform column input (one beat per wave-area pixel).
     input  wire         s_axis_tvalid,
     output wire         s_axis_tready,
-    input  wire [63:0]  s_axis_tdata, // {ch4_max,ch4_min,...,ch1_max,ch1_min}
-    input  wire [63:0]  s_axis_prev_tdata, // previous frame column (for persistence)
+    input  wire [63:0]  s_axis_tdata,
+    input  wire [63:0]  s_axis_prev_tdata,
     input  wire         s_axis_tlast,
     input  wire         s_axis_tuser,
 
     input  wire [65:0]  debug_status,
 
-    // UI/control values
     input  wire [3:0]   ui_page,
     input  wire [3:0]   ui_cursor,
     input  wire         ui_curr_edit_mode,
@@ -82,12 +79,11 @@ module waveform_renderer #(
     localparam DBG_Y0     = 10'd10;
     localparam DBG_BOX    = 11'd12;
     localparam DBG_STRIDE = 11'd14;
-    localparam DBG_W      = 11'd110; // 8*14-2
+    localparam DBG_W      = 11'd110;
     localparam DBG_H      = 10'd110;
 
     assign s_axis_tready = 1'b1;
 
-    // Decode one waveform column min/max pack.
     wire [7:0] ch1_min = s_axis_tdata[7:0];
     wire [7:0] ch1_max = s_axis_tdata[15:8];
     wire [7:0] ch2_min = s_axis_tdata[23:16];
@@ -166,9 +162,7 @@ module waveform_renderer #(
     wire wave_valid   = s_axis_tvalid && s_axis_tready && in_wave_area;
 
     wire [10:0] wave_x = pix_x - UI_W;
-    // High-sample-rate mode (small divider) tends to amplify frame-to-frame
-    // trigger quantization jitter in persistence overlay.
-    // Disable previous-frame overlay in this mode to avoid visible kinks.
+
     wire persistence_en = (sample_div >= 32'd12);
     wire grid_v_hit = (wave_x[5:0] == 6'd0);
     wire grid_h_hit = (pix_y == 10'd0)   || (pix_y == 10'd60)  ||
@@ -179,7 +173,7 @@ module waveform_renderer #(
     wire center_hit = in_wave_area && ((pix_x == (UI_W + (WAVE_W >> 1))) || (pix_y == (V_ACTIVE >> 1)));
 
     wire ch1_bar_hit = wave_valid && in_span_1px(pix_y, ch1_top, ch1_bot);
-    // In flash-view mode only draw stored waveform (ch1 path), suppress other channels.
+
     wire ch2_bar_hit = (!flash_view_enable) && wave_valid && in_span_1px(pix_y, ch2_top, ch2_bot);
     wire ch3_bar_hit = (!flash_view_enable) && wave_valid && in_span_1px(pix_y, ch3_top, ch3_bot);
     wire ch4_bar_hit = (!flash_view_enable) && wave_valid && in_span_1px(pix_y, ch4_top, ch4_bot);
@@ -188,7 +182,6 @@ module waveform_renderer #(
     wire pch3_bar_hit = persistence_en && (!flash_view_enable) && wave_valid && in_span_1px(pix_y, pch3_top, pch3_bot);
     wire pch4_bar_hit = persistence_en && (!flash_view_enable) && wave_valid && in_span_1px(pix_y, pch4_top, pch4_bot);
 
-    // Linear interpolation bridge: connect neighboring column centers for low-sample scenarios.
     reg       mid_prev_valid;
     reg [9:0] ch1_mid_prev, ch2_mid_prev, ch3_mid_prev, ch4_mid_prev;
     reg [9:0] pch1_mid_prev, pch2_mid_prev, pch3_mid_prev, pch4_mid_prev;
@@ -211,7 +204,6 @@ module waveform_renderer #(
     wire pch3_hit = pch3_bar_hit || pch3_line_hit;
     wire pch4_hit = pch4_bar_hit || pch4_line_hit;
 
-    // UI value-to-text mapping (centralized).
     wire [31:0] mode_text;
     wire [7:0]  edge_char;
     wire [23:0] level_text;
@@ -234,21 +226,20 @@ module waveform_renderer #(
 
     always @(*) begin
         case (flash_ui_state)
-            3'd1: flash_state_text = 32'h73617665; // save
-            3'd2: flash_state_text = 32'h6c6f6164; // load
-            3'd3: flash_state_text = 32'h646f6e65; // done
-            3'd4: flash_state_text = 32'h63616e63; // canc
-            3'd5: flash_state_text = 32'h74696d65; // time
-            3'd6: flash_state_text = 32'h65727220; // err
-            3'd7: flash_state_text = 32'h76696577; // view
-            default: flash_state_text = 32'h69646c65; // idle
+            3'd1: flash_state_text = 32'h73617665;
+            3'd2: flash_state_text = 32'h6c6f6164;
+            3'd3: flash_state_text = 32'h646f6e65;
+            3'd4: flash_state_text = 32'h63616e63;
+            3'd5: flash_state_text = 32'h74696d65;
+            3'd6: flash_state_text = 32'h65727220;
+            3'd7: flash_state_text = 32'h76696577;
+            default: flash_state_text = 32'h69646c65;
         endcase
     end
 
-    // Text rendering on left panel: 8x12 glyph in 8x16 cell.
     wire [3:0] cell_row = pix_y[3:0];
-    wire [4:0] cell_line = pix_y[8:4]; // 0..29
-    wire [3:0] cell_col = pix_x[6:3];  // 0..15 for UI area
+    wire [4:0] cell_line = pix_y[8:4];
+    wire [3:0] cell_col = pix_x[6:3];
     wire [2:0] cell_bit = pix_x[2:0];
 
     reg [7:0] ui_char_code;
@@ -348,21 +339,21 @@ module waveform_renderer #(
             case (ui_page)
                 PAGE_SRC_CFG: begin
                     case (ui_cursor)
-                        4'd0: begin // freq
+                        4'd0: begin
                             btn_count  = 3'd4;
                             btn_label0 = str5(8'h31,8'h30,8'h6b,8'h20,8'h20);
                             btn_label1 = str5(8'h32,8'h30,8'h6b,8'h20,8'h20);
                             btn_label2 = str5(8'h33,8'h30,8'h6b,8'h20,8'h20);
                             btn_label3 = str5(8'h34,8'h30,8'h6b,8'h20,8'h20);
                         end
-                        4'd1: begin // type
+                        4'd1: begin
                             btn_count  = 3'd4;
                             btn_label0 = str5(8'h73,8'h69,8'h6e,8'h65,8'h20);
                             btn_label1 = str5(8'h73,8'h71,8'h72,8'h65,8'h20);
                             btn_label2 = str5(8'h74,8'h72,8'h69,8'h61,8'h20);
                             btn_label3 = str5(8'h73,8'h61,8'h77,8'h20,8'h20);
                         end
-                        default: begin // phase
+                        default: begin
                             btn_count  = 3'd4;
                             btn_label0 = str5(8'h30,8'h20,8'h20,8'h20,8'h20);
                             btn_label1 = str5(8'h39,8'h30,8'h20,8'h20,8'h20);
@@ -473,7 +464,6 @@ module waveform_renderer #(
         end
     end
 
-    // Button activity/color.
     reg btn_hit;
     reg [2:0] btn_id;
     reg btn_active;
@@ -523,7 +513,7 @@ module waveform_renderer #(
     end
 
     always @(*) begin
-        ui_char_code = 8'h20; // default space
+        ui_char_code = 8'h20;
 
         case (cell_line)
             5'd1: begin
@@ -554,30 +544,30 @@ module waveform_renderer #(
                 if ((cell_col >= 4'd5) && (cell_col <= 4'd9))
                     ui_char_code = pick40(btn_label6, cell_col - 4'd5);
             end
-            5'd16: begin // mode:auto/norm
+            5'd16: begin
                 case (cell_col)
-                    4'd0: ui_char_code = 8'h6d; // m
-                    4'd1: ui_char_code = 8'h6f; // o
-                    4'd2: ui_char_code = 8'h64; // d
-                    4'd3: ui_char_code = 8'h65; // e
-                    4'd4: ui_char_code = 8'h3a; // :
+                    4'd0: ui_char_code = 8'h6d;
+                    4'd1: ui_char_code = 8'h6f;
+                    4'd2: ui_char_code = 8'h64;
+                    4'd3: ui_char_code = 8'h65;
+                    4'd4: ui_char_code = 8'h3a;
                     4'd5: ui_char_code = pick32(mode_text, 2'd0);
                     4'd6: ui_char_code = pick32(mode_text, 2'd1);
                     4'd7: ui_char_code = pick32(mode_text, 2'd2);
                     4'd8: ui_char_code = pick32(mode_text, 2'd3);
                 endcase
             end
-            5'd17: begin // edge:r/f
+            5'd17: begin
                 case (cell_col)
-                    4'd0: ui_char_code = 8'h65; // e
-                    4'd1: ui_char_code = 8'h64; // d
-                    4'd2: ui_char_code = 8'h67; // g
-                    4'd3: ui_char_code = 8'h65; // e
-                    4'd4: ui_char_code = 8'h3a; // :
+                    4'd0: ui_char_code = 8'h65;
+                    4'd1: ui_char_code = 8'h64;
+                    4'd2: ui_char_code = 8'h67;
+                    4'd3: ui_char_code = 8'h65;
+                    4'd4: ui_char_code = 8'h3a;
                     4'd5: ui_char_code = edge_char;
                 endcase
             end
-            5'd18: begin // level:xxx
+            5'd18: begin
                 case (cell_col)
                     4'd0: ui_char_code = 8'h6c;
                     4'd1: ui_char_code = 8'h65;
@@ -590,7 +580,7 @@ module waveform_renderer #(
                     4'd8: ui_char_code = pick24(level_text, 2'd2);
                 endcase
             end
-            5'd19: begin // div:xxxx
+            5'd19: begin
                 case (cell_col)
                     4'd0: ui_char_code = 8'h64;
                     4'd1: ui_char_code = 8'h69;
@@ -602,7 +592,7 @@ module waveform_renderer #(
                     4'd7: ui_char_code = pick32(div_text, 2'd3);
                 endcase
             end
-            5'd20: begin // trig:x
+            5'd20: begin
                 case (cell_col)
                     4'd0: ui_char_code = 8'h74;
                     4'd1: ui_char_code = 8'h72;
@@ -612,7 +602,7 @@ module waveform_renderer #(
                     4'd5: ui_char_code = trig_src_char;
                 endcase
             end
-            5'd21: begin // src:x
+            5'd21: begin
                 case (cell_col)
                     4'd0: ui_char_code = 8'h73;
                     4'd1: ui_char_code = 8'h72;
@@ -621,11 +611,11 @@ module waveform_renderer #(
                     4'd4: ui_char_code = src_char3(ui_active_src_sel);
                 endcase
             end
-            5'd22: begin // fsh:state
+            5'd22: begin
                 case (cell_col)
-                    4'd0: ui_char_code = 8'h66; // f
-                    4'd1: ui_char_code = 8'h73; // s
-                    4'd2: ui_char_code = 8'h68; // h
+                    4'd0: ui_char_code = 8'h66;
+                    4'd1: ui_char_code = 8'h73;
+                    4'd2: ui_char_code = 8'h68;
                     4'd3: ui_char_code = 8'h3a;
                     4'd4: ui_char_code = pick32(flash_state_text, 2'd0);
                     4'd5: ui_char_code = pick32(flash_state_text, 2'd1);
@@ -633,11 +623,11 @@ module waveform_renderer #(
                     4'd7: ui_char_code = pick32(flash_state_text, 2'd3);
                 endcase
             end
-            5'd23: begin // id:xxxxxx
+            5'd23: begin
                 case (cell_col)
-                    4'd0: ui_char_code = 8'h69; // i
-                    4'd1: ui_char_code = 8'h64; // d
-                    4'd2: ui_char_code = 8'h3a; // :
+                    4'd0: ui_char_code = 8'h69;
+                    4'd1: ui_char_code = 8'h64;
+                    4'd2: ui_char_code = 8'h3a;
                     4'd3: ui_char_code = flash_jedec_valid ? hex_char(flash_jedec_id[23:20]) : 8'h2d;
                     4'd4: ui_char_code = flash_jedec_valid ? hex_char(flash_jedec_id[19:16]) : 8'h2d;
                     4'd5: ui_char_code = flash_jedec_valid ? hex_char(flash_jedec_id[15:12]) : 8'h2d;
@@ -650,7 +640,6 @@ module waveform_renderer #(
         endcase
     end
 
-    // Match synchronous font ROM with one-cycle context delay.
     always @(posedge clk_pix) begin
         in_ui_area_d      <= in_ui_area;
         cell_row_lt12_d   <= (cell_row < 4'd12);
@@ -668,7 +657,6 @@ module waveform_renderer #(
         end
     end
 
-    // Track previous column center values for per-line interpolation.
     always @(posedge clk_pix) begin
         if (!de || !in_wave_area) begin
             mid_prev_valid <= 1'b0;
@@ -692,7 +680,6 @@ module waveform_renderer #(
         .row_bits (font_row_bits)
     );
 
-    // Debug matrix (size unchanged) moved to top-right.
     reg dbg_hit, dbg_on;
     reg [7:0] dbg_idx;
     reg [10:0] dbg_rel_x;
@@ -733,7 +720,6 @@ module waveform_renderer #(
         end
     end
 
-    // Trigger type blocks (N/T) below debug matrix.
     reg trig_type_hit;
     reg [15:0] trig_type_color;
     always @(*) begin
@@ -742,20 +728,19 @@ module waveform_renderer #(
         if ((pix_x >= DBG_X0) && (pix_x < (DBG_X0 + 12)) &&
             (pix_y >= 10'd124) && (pix_y < 10'd136)) begin
             trig_type_hit = 1'b1;
-            trig_type_color = debug_status[64] ? 16'h07E0 : 16'h2104; // N
+            trig_type_color = debug_status[64] ? 16'h07E0 : 16'h2104;
         end else if ((pix_x >= (DBG_X0 + 14)) && (pix_x < (DBG_X0 + 26)) &&
                      (pix_y >= 10'd124) && (pix_y < 10'd136)) begin
             trig_type_hit = 1'b1;
-            trig_type_color = debug_status[65] ? 16'hF800 : 16'h2104; // T
+            trig_type_color = debug_status[65] ? 16'hF800 : 16'h2104;
         end
     end
 
-    // Final color composition.
     always @(*) begin
         if (!de) begin
             rgb565 = COLOR_BLACK;
         end else begin
-            // Base layers.
+
             if (in_ui_area)
                 rgb565 = COLOR_UI_BG;
             else
@@ -766,11 +751,6 @@ module waveform_renderer #(
             if (in_wave_area && center_hit)
                 rgb565 = COLOR_CENTER;
 
-            // Wave channels (independent fixed colors).
-            // Persistence layering:
-            // - previous frame: dim color
-            // - current frame : bright color
-            // - overlap       : boosted bright color
             if (pch4_hit)
                 rgb565 = COLOR_CH4_DIM;
             if (pch3_hit)
@@ -798,13 +778,11 @@ module waveform_renderer #(
             if (pch1_hit && ch1_hit)
                 rgb565 = flash_view_enable ? 16'h18C3 : COLOR_CH1_BOOST;
 
-            // UI buttons + text.
             if (in_ui_area && btn_hit)
                 rgb565 = btn_color;
             if (in_ui_area && ui_text_hit)
                 rgb565 = COLOR_UI_TEXT;
 
-            // Debug overlays (top priority).
             if (trig_type_hit)
                 rgb565 = trig_type_color;
             if (dbg_hit)

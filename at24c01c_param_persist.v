@@ -1,16 +1,16 @@
 // -----------------------------------------------------------------------------
 // at24c01c_param_persist
 // -----------------------------------------------------------------------------
-// Purpose:
-//   Automatic parameter persistence using AT24C01C over I2C.
-//   1) Read once at power-up.
-//   2) After each save_req pulse, write latest parameter snapshot.
+// Two-layer FSM design:
+// - Primitive I2C engine: START/STOP/WRITE/READ byte-level sequencing.
+// - High-level flow: boot read-and-validate, then queued save transactions.
 //
-// Notes:
-//   - Device address: 0x50 (A2/A1/A0 grounded).
-//   - Byte write mode is used (simple and robust).
-//   - Write cycle wait time follows typical tWR ~5ms.
+// Key registers:
+// - hs_state: high-level transaction state.
+// - prim_*: low-level bit/byte transfer state.
+// - pending_save/latched_save_state: save request queueing while busy.
 // -----------------------------------------------------------------------------
+
 module at24c01c_param_persist #(
     parameter integer CLK_HZ = 50_000_000,
     parameter integer I2C_HZ = 100_000
@@ -32,22 +32,21 @@ module at24c01c_param_persist #(
     output wire        sda_oe
 );
 
+    // EEPROM protocol constants and lightweight payload schema.
     localparam [7:0] DEV_ADDR_W = 8'hA0;
     localparam [7:0] DEV_ADDR_R = 8'hA1;
     localparam [7:0] MAGIC      = 8'hA5;
     localparam [7:0] VERSION    = 8'h01;
 
-    localparam integer TICK_DIV = CLK_HZ / (I2C_HZ * 2); // half SCL period
-    localparam integer TWR_WAIT_CYC = CLK_HZ / 200;      // ~5ms
+    localparam integer TICK_DIV = CLK_HZ / (I2C_HZ * 2);
+    localparam integer TWR_WAIT_CYC = CLK_HZ / 200;
 
-    // Primitive op types.
     localparam [2:0] PRIM_NONE  = 3'd0;
     localparam [2:0] PRIM_START = 3'd1;
     localparam [2:0] PRIM_STOP  = 3'd2;
     localparam [2:0] PRIM_WRITE = 3'd3;
     localparam [2:0] PRIM_READ  = 3'd4;
 
-    // High-level states.
     localparam [5:0] HS_BOOT_SET_START = 6'd0;
     localparam [5:0] HS_BOOT_SET_DEVW  = 6'd1;
     localparam [5:0] HS_BOOT_SET_ADDR0 = 6'd2;
@@ -66,17 +65,17 @@ module at24c01c_param_persist #(
     localparam [5:0] HS_SAVE_STOP      = 6'd15;
     localparam [5:0] HS_SAVE_WAIT      = 6'd16;
 
-    // I2C line controls.
+    // Open-drain style line driving:
+    // - sda_out is hardwired zero
+    // - sda_oe controls whether line is pulled low or released
     reg scl_out;
     reg sda_drive_low;
     assign scl = scl_out;
-    // Open-drain style:
-    //   - sda_out is fixed to 0
-    //   - sda_oe=1 drives low, sda_oe=0 releases line
+
     assign sda_out = 1'b0;
     assign sda_oe  = sda_drive_low;
 
-    // Tick generator.
+    // Bit-time generator shared by all primitive operations.
     reg [15:0] tick_cnt;
     wire bit_tick = (tick_cnt == (TICK_DIV - 1));
 
@@ -89,7 +88,7 @@ module at24c01c_param_persist #(
             tick_cnt <= tick_cnt + 16'd1;
     end
 
-    // Primitive engine.
+    // Primitive byte transfer engine state.
     reg        prim_busy;
     reg        prim_done;
     reg [2:0]  prim_op;
@@ -99,13 +98,16 @@ module at24c01c_param_persist #(
     reg [7:0]  prim_shift;
     reg [7:0]  prim_rx_byte;
     reg        prim_ack_sample;
-    reg        prim_ack_to_slave; // for PRIM_READ: 0=ACK, 1=NACK
+    reg        prim_ack_to_slave;
 
     reg        prim_launch;
     reg [2:0]  prim_launch_op;
     reg [7:0]  prim_launch_byte;
     reg        prim_launch_ack;
 
+    // Primitive I2C FSM:
+    // - executes one launched primitive command at a time
+    // - raises prim_done for one cycle when primitive completes
     always @(posedge clk_50m or negedge rst_n) begin
         if (!rst_n) begin
             scl_out         <= 1'b1;
@@ -180,7 +182,7 @@ module at24c01c_param_persist #(
                     PRIM_WRITE: begin
                         case (prim_state)
                             3'd0: begin
-                                // Data bit loop.
+
                                 if (!prim_phase) begin
                                     scl_out       <= 1'b0;
                                     sda_drive_low <= ~prim_shift[prim_bit];
@@ -195,14 +197,14 @@ module at24c01c_param_persist #(
                                 end
                             end
                             3'd1: begin
-                                // ACK sample.
+
                                 if (!prim_phase) begin
                                     scl_out       <= 1'b0;
                                     sda_drive_low <= 1'b0;
                                     prim_phase    <= 1'b1;
                                 end else begin
                                     scl_out         <= 1'b1;
-                                    prim_ack_sample <= sda_in; // 0=ACK
+                                    prim_ack_sample <= sda_in;
                                     prim_phase      <= 1'b0;
                                     prim_state      <= 3'd2;
                                 end
@@ -219,7 +221,7 @@ module at24c01c_param_persist #(
                     PRIM_READ: begin
                         case (prim_state)
                             3'd0: begin
-                                // Data bit loop.
+
                                 if (!prim_phase) begin
                                     scl_out       <= 1'b0;
                                     sda_drive_low <= 1'b0;
@@ -235,10 +237,10 @@ module at24c01c_param_persist #(
                                 end
                             end
                             3'd1: begin
-                                // Master ACK/NACK.
+
                                 if (!prim_phase) begin
                                     scl_out       <= 1'b0;
-                                    sda_drive_low <= ~prim_ack_to_slave; // ACK=0 => drive low
+                                    sda_drive_low <= ~prim_ack_to_slave;
                                     prim_phase    <= 1'b1;
                                 end else begin
                                     scl_out    <= 1'b1;
@@ -264,7 +266,7 @@ module at24c01c_param_persist #(
         end
     end
 
-    // High-level controller.
+    // High-level transaction FSM state.
     reg [5:0] hs_state;
     reg       hs_step_issued;
     reg [3:0] byte_idx;
@@ -278,6 +280,10 @@ module at24c01c_param_persist #(
     reg [7:0] checksum;
     integer i;
 
+    // High-level flow control:
+    // 1) boot: read EEPROM bytes and validate MAGIC/VERSION/checksum
+    // 2) idle: wait for queued save request
+    // 3) save: byte-write each payload location with tWR wait between bytes
     always @(posedge clk_50m or negedge rst_n) begin
         if (!rst_n) begin
             hs_state         <= HS_BOOT_SET_START;
@@ -306,9 +312,7 @@ module at24c01c_param_persist #(
             busy <= (hs_state != HS_IDLE);
 
             case (hs_state)
-                // -------------------------
-                // Boot read sequence.
-                // -------------------------
+
                 HS_BOOT_SET_START: begin
                     if (!hs_step_issued && !prim_busy) begin
                         prim_launch    <= 1'b1;
@@ -393,7 +397,7 @@ module at24c01c_param_persist #(
                     if (!hs_step_issued && !prim_busy) begin
                         prim_launch      <= 1'b1;
                         prim_launch_op   <= PRIM_READ;
-                        prim_launch_ack  <= (byte_idx == 4'd9); // last byte => NACK
+                        prim_launch_ack  <= (byte_idx == 4'd9);
                         hs_step_issued   <= 1'b1;
                     end else if (hs_step_issued && prim_done) begin
                         hs_step_issued <= 1'b0;
@@ -440,9 +444,6 @@ module at24c01c_param_persist #(
                     hs_state  <= HS_IDLE;
                 end
 
-                // -------------------------
-                // Idle / save sequence.
-                // -------------------------
                 HS_IDLE: begin
                     if (!boot_done)
                         hs_state <= HS_BOOT_SET_START;
@@ -451,7 +452,7 @@ module at24c01c_param_persist #(
                 end
 
                 HS_SAVE_PREP: begin
-                    pending_save <= 1'b0; // consume latest snapshot
+                    pending_save <= 1'b0;
 
                     wr_buf[0] <= MAGIC;
                     wr_buf[1] <= VERSION;
@@ -507,7 +508,7 @@ module at24c01c_param_persist #(
                     if (!hs_step_issued && !prim_busy) begin
                         prim_launch      <= 1'b1;
                         prim_launch_op   <= PRIM_WRITE;
-                        // AT24C01C internal address is 7-bit, but we only use low 10 bytes.
+
                         prim_launch_byte <= {4'b0000, byte_idx};
                         hs_step_issued   <= 1'b1;
                     end else if (hs_step_issued && prim_done) begin
@@ -568,8 +569,6 @@ module at24c01c_param_persist #(
                 end
             endcase
 
-            // Latch latest requested save snapshot (placed after state machine so
-            // a concurrent request cannot be overwritten by HS_SAVE_PREP).
             if (save_req) begin
                 pending_save       <= 1'b1;
                 latched_save_state <= save_state;
