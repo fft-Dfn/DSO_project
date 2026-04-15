@@ -9,3 +9,4 @@ ip/**
 !ip/*/
 !ip/*/settings.json
 DSO_project.peri.xml
+DSO_project.xml
