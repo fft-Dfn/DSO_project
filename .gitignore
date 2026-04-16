@@ -10,3 +10,5 @@ ip/**
 !ip/*/settings.json
 DSO_project.peri.xml
 DSO_project.xml
+_midreport_alltext.txt
+_midreport_paras.txt

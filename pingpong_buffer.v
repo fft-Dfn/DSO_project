@@ -3,13 +3,15 @@
 // -----------------------------------------------------------------------------
 // Architecture:
 // - Two-bank frame buffer with write domain at 50 MHz and read domain at 25 MHz.
-// - Write side commits completed frames; read side only switches active bank at frame boundary.
+// - Write side captures completed frame descriptors into Efinity async FIFO.
+// - Read side pops one descriptor only at frame boundary and switches bank atomically.
 //
 // State/handshake intent:
-// - capture_active_wr/capture_bank_wr lock one target bank during an ongoing capture burst.
-// - pending_bank_rd stores newest committed bank until rd_frame_done allows atomic switch.
-// - commit_inflight_wr blocks rearm until read side consumes the committed frame, preventing
-//   pending-bank overwrite before display handoff.
+// - capture_active_wr/capture_bank_wr lock one target bank during a capture burst.
+// - commit_inflight_wr blocks rearm until read side consumes one committed descriptor.
+// - Descriptor FIFO format (2x16b per frame, merged to 1x32b at read):
+//   word0(main)   = {2'b10, bank[0], frame_start_addr[9:0], 3'b101}
+//   word1(shadow) = {2'b01, bank[0], frame_start_addr[9:0], 3'b010}
 // -----------------------------------------------------------------------------
 
 module pingpong_buffer #(
@@ -108,26 +110,73 @@ module pingpong_buffer #(
         end
     endgenerate
 
-    // Write-domain capture lock:
-    // - capture_active_wr: a capture burst is in progress
-    // - capture_bank_wr  : bank fixed for this burst from first write beat to capture_done
+    // Write-domain capture lock.
     reg capture_active_wr;
     reg capture_bank_wr;
+
+    // Read-side active bank sampled back into write domain.
     reg active_bank_rd;
     reg active_bank_sync1_wr, active_bank_sync2_wr;
     reg frame_valid_sync1_wr, frame_valid_sync2_wr;
-    // A committed frame exists but has not been consumed by read domain yet.
+
+    // One frame descriptor is committed but not yet consumed by read domain.
     reg commit_inflight_wr;
 
-    reg bank0_commit_tog_wr, bank1_commit_tog_wr;
-    reg bank0_commit_req_wr, bank1_commit_req_wr;
-    reg [ADDR_W-1:0] bank0_start_addr_wr, bank1_start_addr_wr;
     reg dbg_we_seen_wr, dbg_capdone_seen_wr, dbg_write_active_seen_wr, dbg_overrun_seen_wr;
     reg dbg_bank0_we_seen_wr, dbg_bank1_we_seen_wr;
-    // Read->write acknowledgment toggle synchronizer.
+    reg dbg_fifo_full_seen_wr, dbg_fifo_overflow_seen_wr;
+
+    reg dbg_rd_switch_seen, dbg_bad_desc_seen_rd, dbg_fifo_underflow_seen_rd;
+
+    // Read->write consume acknowledgment toggle synchronizer.
     reg consume_tog_sync1_wr, consume_tog_sync2_wr, consume_tog_d_wr;
     reg consume_tog_rd;
     wire consume_pulse_wr = consume_tog_sync2_wr ^ consume_tog_d_wr;
+
+    // Frame descriptor FIFO signals.
+    reg         desc_fifo_wr_en;
+    reg [15:0]  desc_fifo_wdata;
+    reg         desc_fifo_rd_en;
+    wire [31:0] desc_fifo_rdata;
+    wire        desc_fifo_full;
+    wire        desc_fifo_prog_full;
+    wire        desc_fifo_empty;
+    wire        desc_fifo_rst_busy;
+    wire [9:0]  desc_fifo_wr_count;
+    wire [8:0]  desc_fifo_rd_count;
+    wire        desc_fifo_underflow;
+    wire        desc_fifo_overflow;
+    wire        desc_fifo_arst = ~(rst_n_write & rst_n_read);
+
+    // Efinity FIFO IP: async clock, 16-bit write / 32-bit read (1:2).
+    efx_fifo_0 u_frame_desc_fifo (
+        .prog_full_o     (desc_fifo_prog_full),
+        .full_o          (desc_fifo_full),
+        .empty_o         (desc_fifo_empty),
+        .wr_clk_i        (clk_write),
+        .rd_clk_i        (clk_read),
+        .wr_en_i         (desc_fifo_wr_en),
+        .rd_en_i         (desc_fifo_rd_en),
+        .wdata           (desc_fifo_wdata),
+        .rst_busy        (desc_fifo_rst_busy),
+        .rdata           (desc_fifo_rdata),
+        .a_rst_i         (desc_fifo_arst),
+        .wr_datacount_o  (desc_fifo_wr_count),
+        .rd_datacount_o  (desc_fifo_rd_count),
+        .underflow_o     (desc_fifo_underflow),
+        .overflow_o      (desc_fifo_overflow)
+    );
+
+    localparam PUSH_IDLE = 2'd0;
+    localparam PUSH_W0   = 2'd1;
+    localparam PUSH_W1   = 2'd2;
+    reg [1:0]  desc_push_state_wr;
+    reg [15:0] desc_word0_wr;
+    reg [15:0] desc_word1_wr;
+
+    localparam [1:0] POP_WAIT_CYCLES = 2'd2;
+    reg        pop_active_rd;
+    reg [1:0]  pop_wait_rd;
 
     wire write_bank_sel = capture_active_wr ? capture_bank_wr : wr_bank_sel;
     wire safe_idle_bank_sel = frame_valid_sync2_wr ? ~active_bank_sync2_wr : wr_bank_sel;
@@ -135,14 +184,20 @@ module pingpong_buffer #(
     assign bank0_we_a = we && (write_bank_sel == 1'b0) && ~writing_active_bank;
     assign bank1_we_a = we && (write_bank_sel == 1'b1) && ~writing_active_bank;
 
-    // Rearm is allowed only when:
-    // 1) current capture burst is fully finished, and
-    // 2) the last committed frame has already been consumed by display side.
-    assign capture_ready = !capture_active_wr && !commit_inflight_wr;
+    // Rearm only when capture burst ended and committed descriptor was consumed.
+    assign capture_ready = !capture_active_wr &&
+                           !commit_inflight_wr &&
+                           (desc_push_state_wr == PUSH_IDLE);
 
-    // Write-domain control FSM (capture lock + commit publication).
+    // Write-domain control FSM:
+    // 1) lock capture bank
+    // 2) on capture_done, queue frame descriptor into FIFO
+    // 3) wait consume ack from read side
     always @(posedge clk_write or negedge rst_n_write) begin
         if (!rst_n_write) begin
+            desc_fifo_wr_en            <= 1'b0;
+            desc_fifo_wdata            <= 16'd0;
+
             wr_bank_sel               <= 1'b1;
             capture_active_wr         <= 1'b0;
             capture_bank_wr           <= 1'b1;
@@ -151,24 +206,25 @@ module pingpong_buffer #(
             frame_valid_sync1_wr      <= 1'b0;
             frame_valid_sync2_wr      <= 1'b0;
             commit_inflight_wr        <= 1'b0;
-            bank0_commit_tog_wr       <= 1'b0;
-            bank1_commit_tog_wr       <= 1'b0;
-            bank0_commit_req_wr       <= 1'b0;
-            bank1_commit_req_wr       <= 1'b0;
-            bank0_start_addr_wr       <= {ADDR_W{1'b0}};
-            bank1_start_addr_wr       <= {ADDR_W{1'b0}};
             consume_tog_sync1_wr      <= 1'b0;
             consume_tog_sync2_wr      <= 1'b0;
             consume_tog_d_wr          <= 1'b0;
+            desc_push_state_wr        <= PUSH_IDLE;
+            desc_word0_wr             <= 16'd0;
+            desc_word1_wr             <= 16'd0;
             dbg_we_seen_wr            <= 1'b0;
             dbg_capdone_seen_wr       <= 1'b0;
             dbg_write_active_seen_wr  <= 1'b0;
             dbg_overrun_seen_wr       <= 1'b0;
             dbg_bank0_we_seen_wr      <= 1'b0;
             dbg_bank1_we_seen_wr      <= 1'b0;
+            dbg_fifo_full_seen_wr     <= 1'b0;
+            dbg_fifo_overflow_seen_wr <= 1'b0;
             overflow                  <= 1'b0;
         end else begin
+            desc_fifo_wr_en <= 1'b0;
             overflow <= 1'b0;
+
             if (we)
                 dbg_we_seen_wr <= 1'b1;
             if (bank0_we_a)
@@ -179,6 +235,10 @@ module pingpong_buffer #(
                 dbg_capdone_seen_wr <= 1'b1;
             if (writing_active_bank)
                 dbg_write_active_seen_wr <= 1'b1;
+            if (desc_fifo_full)
+                dbg_fifo_full_seen_wr <= 1'b1;
+            if (desc_fifo_overflow)
+                dbg_fifo_overflow_seen_wr <= 1'b1;
 
             active_bank_sync1_wr <= active_bank_rd;
             active_bank_sync2_wr <= active_bank_sync1_wr;
@@ -188,18 +248,9 @@ module pingpong_buffer #(
             consume_tog_sync2_wr <= consume_tog_sync1_wr;
             consume_tog_d_wr     <= consume_tog_sync2_wr;
 
-            // Read domain toggles consume_tog_rd when it accepts pending frame.
+            // Read side consumed one committed descriptor.
             if (consume_pulse_wr)
                 commit_inflight_wr <= 1'b0;
-
-            if (bank0_commit_req_wr) begin
-                bank0_commit_tog_wr <= ~bank0_commit_tog_wr;
-                bank0_commit_req_wr <= 1'b0;
-            end
-            if (bank1_commit_req_wr) begin
-                bank1_commit_tog_wr <= ~bank1_commit_tog_wr;
-                bank1_commit_req_wr <= 1'b0;
-            end
 
             if (!capture_active_wr && frame_valid_sync2_wr)
                 wr_bank_sel <= ~active_bank_sync2_wr;
@@ -214,103 +265,107 @@ module pingpong_buffer #(
 
             if (capture_done) begin
                 if (frame_valid_sync2_wr && (capture_bank_wr == active_bank_sync2_wr)) begin
-
                     overflow <= 1'b1;
                     dbg_overrun_seen_wr <= 1'b1;
-                end else begin
-                    // Publish a new frame commit into read domain via toggle pulse.
-                    if (capture_bank_wr == 1'b0) begin
-                        bank0_start_addr_wr       <= frame_start_addr;
-                        bank0_commit_req_wr       <= 1'b1;
-                    end else begin
-                        bank1_start_addr_wr       <= frame_start_addr;
-                        bank1_commit_req_wr       <= 1'b1;
-                    end
+                end else if (!commit_inflight_wr && (desc_push_state_wr == PUSH_IDLE)) begin
+                    // Main + shadow descriptor words (16b each) to build one 32b read record.
+                    desc_word0_wr      <= {2'b10, capture_bank_wr, frame_start_addr[9:0], 3'b101};
+                    desc_word1_wr      <= {2'b01, capture_bank_wr, frame_start_addr[9:0], 3'b010};
+                    desc_push_state_wr <= PUSH_W0;
                     commit_inflight_wr <= 1'b1;
+                end else begin
+                    // Should not happen if capture_ready gating is respected.
+                    overflow <= 1'b1;
+                    dbg_overrun_seen_wr <= 1'b1;
                 end
 
                 if (frame_valid_sync2_wr)
                     wr_bank_sel <= ~active_bank_sync2_wr;
             end
+
+            case (desc_push_state_wr)
+                PUSH_IDLE: begin
+                end
+
+                PUSH_W0: begin
+                    // Use prog_full to guarantee there is room for 2x16b words.
+                    if (!desc_fifo_prog_full && !desc_fifo_rst_busy) begin
+                        desc_fifo_wr_en      <= 1'b1;
+                        desc_fifo_wdata      <= desc_word0_wr;
+                        desc_push_state_wr   <= PUSH_W1;
+                    end
+                end
+
+                PUSH_W1: begin
+                    if (!desc_fifo_full && !desc_fifo_rst_busy) begin
+                        desc_fifo_wr_en      <= 1'b1;
+                        desc_fifo_wdata      <= desc_word1_wr;
+                        desc_push_state_wr   <= PUSH_IDLE;
+                    end
+                end
+
+                default: begin
+                    desc_push_state_wr <= PUSH_IDLE;
+                end
+            endcase
         end
     end
 
-    // Read-domain control FSM (pending queue + atomic frame-boundary bank switch).
-    reg bank0_commit_sync1_rd, bank0_commit_sync2_rd, bank0_commit_sync2_d_rd;
-    reg bank1_commit_sync1_rd, bank1_commit_sync2_rd, bank1_commit_sync2_d_rd;
-    wire bank0_commit_pulse_rd = bank0_commit_sync2_rd ^ bank0_commit_sync2_d_rd;
-    wire bank1_commit_pulse_rd = bank1_commit_sync2_rd ^ bank1_commit_sync2_d_rd;
-
-    reg [ADDR_W-1:0] bank0_start_sync1_rd, bank0_start_sync2_rd;
-    reg [ADDR_W-1:0] bank1_start_sync1_rd, bank1_start_sync2_rd;
-
-    reg pending_valid_rd;
-    reg pending_bank_rd;
-    reg [ADDR_W-1:0] pending_start_addr_rd;
-    reg dbg_rd_switch_seen, dbg_commit_seen_rd;
-
+    // Read-domain control FSM:
+    // Pop one frame descriptor from FIFO at frame boundary and switch atomically.
     always @(posedge clk_read or negedge rst_n_read) begin
         if (!rst_n_read) begin
-            bank0_commit_sync1_rd         <= 1'b0;
-            bank0_commit_sync2_rd         <= 1'b0;
-            bank0_commit_sync2_d_rd       <= 1'b0;
-            bank1_commit_sync1_rd         <= 1'b0;
-            bank1_commit_sync2_rd         <= 1'b0;
-            bank1_commit_sync2_d_rd       <= 1'b0;
-            bank0_start_sync1_rd          <= {ADDR_W{1'b0}};
-            bank0_start_sync2_rd          <= {ADDR_W{1'b0}};
-            bank1_start_sync1_rd          <= {ADDR_W{1'b0}};
-            bank1_start_sync2_rd          <= {ADDR_W{1'b0}};
+            desc_fifo_rd_en               <= 1'b0;
             active_bank_rd                <= 1'b0;
-            pending_valid_rd              <= 1'b0;
-            pending_bank_rd               <= 1'b0;
-            pending_start_addr_rd         <= {ADDR_W{1'b0}};
+            pop_active_rd                 <= 1'b0;
+            pop_wait_rd                   <= 2'd0;
             frame_valid                   <= 1'b0;
             active_frame_start_addr       <= {ADDR_W{1'b0}};
             dbg_rd_switch_seen            <= 1'b0;
-            dbg_commit_seen_rd            <= 1'b0;
+            dbg_bad_desc_seen_rd          <= 1'b0;
+            dbg_fifo_underflow_seen_rd    <= 1'b0;
             consume_tog_rd                <= 1'b0;
         end else begin
-            bank0_commit_sync1_rd   <= bank0_commit_tog_wr;
-            bank0_commit_sync2_rd   <= bank0_commit_sync1_rd;
-            bank0_commit_sync2_d_rd <= bank0_commit_sync2_rd;
-            bank1_commit_sync1_rd   <= bank1_commit_tog_wr;
-            bank1_commit_sync2_rd   <= bank1_commit_sync1_rd;
-            bank1_commit_sync2_d_rd <= bank1_commit_sync2_rd;
-            bank0_start_sync1_rd    <= bank0_start_addr_wr;
-            bank0_start_sync2_rd    <= bank0_start_sync1_rd;
-            bank1_start_sync1_rd    <= bank1_start_addr_wr;
-            bank1_start_sync2_rd    <= bank1_start_sync1_rd;
+            desc_fifo_rd_en <= 1'b0;
 
-            if (bank0_commit_pulse_rd) begin
-                pending_valid_rd      <= 1'b1;
-                pending_bank_rd       <= 1'b0;
-                pending_start_addr_rd <= bank0_start_sync2_rd;
-                dbg_commit_seen_rd    <= 1'b1;
-            end
-            if (bank1_commit_pulse_rd) begin
-                pending_valid_rd      <= 1'b1;
-                pending_bank_rd       <= 1'b1;
-                pending_start_addr_rd <= bank1_start_sync2_rd;
-                dbg_commit_seen_rd    <= 1'b1;
-            end
+            if (desc_fifo_underflow)
+                dbg_fifo_underflow_seen_rd <= 1'b1;
 
-            if (!frame_valid && pending_valid_rd) begin
-                // First valid frame after reset can switch immediately.
-                active_bank_rd          <= pending_bank_rd;
-                active_frame_start_addr <= pending_start_addr_rd;
-                pending_valid_rd        <= 1'b0;
-                frame_valid             <= 1'b1;
-                dbg_rd_switch_seen      <= 1'b1;
-                consume_tog_rd          <= ~consume_tog_rd;
-            end else if (rd_frame_done && pending_valid_rd) begin
-                // Normal path: only switch display source at frame boundary.
-                active_bank_rd          <= pending_bank_rd;
-                active_frame_start_addr <= pending_start_addr_rd;
-                pending_valid_rd        <= 1'b0;
-                frame_valid             <= 1'b1;
-                dbg_rd_switch_seen      <= 1'b1;
-                consume_tog_rd          <= ~consume_tog_rd;
+            if (pop_active_rd) begin
+                if (pop_wait_rd != 2'd0) begin
+                    pop_wait_rd <= pop_wait_rd - 1'b1;
+                end else begin
+                    // Descriptor order can be upper/lower or lower/upper depending internal endian mapping.
+                    if ((desc_fifo_rdata[31:30] == 2'b10) &&
+                        (desc_fifo_rdata[15:14] == 2'b01) &&
+                        (desc_fifo_rdata[18:16] == 3'b101) &&
+                        (desc_fifo_rdata[2:0]   == 3'b010) &&
+                        (desc_fifo_rdata[29:19] == desc_fifo_rdata[13:3])) begin
+                        active_bank_rd          <= desc_fifo_rdata[29];
+                        active_frame_start_addr <= desc_fifo_rdata[28:19];
+                        frame_valid             <= 1'b1;
+                        dbg_rd_switch_seen      <= 1'b1;
+                    end else if ((desc_fifo_rdata[15:14] == 2'b10) &&
+                                 (desc_fifo_rdata[31:30] == 2'b01) &&
+                                 (desc_fifo_rdata[2:0]   == 3'b101) &&
+                                 (desc_fifo_rdata[18:16] == 3'b010) &&
+                                 (desc_fifo_rdata[13:3]  == desc_fifo_rdata[29:19])) begin
+                        active_bank_rd          <= desc_fifo_rdata[13];
+                        active_frame_start_addr <= desc_fifo_rdata[12:3];
+                        frame_valid             <= 1'b1;
+                        dbg_rd_switch_seen      <= 1'b1;
+                    end else begin
+                        dbg_bad_desc_seen_rd    <= 1'b1;
+                    end
+
+                    // One descriptor popped from FIFO, release write-side rearm lock.
+                    consume_tog_rd  <= ~consume_tog_rd;
+                    pop_active_rd   <= 1'b0;
+                end
+            end else if ((!frame_valid || rd_frame_done) && !desc_fifo_empty && !desc_fifo_rst_busy) begin
+                desc_fifo_rd_en <= 1'b1;
+                pop_active_rd   <= 1'b1;
+                pop_wait_rd     <= POP_WAIT_CYCLES;
             end
         end
     end
@@ -346,18 +401,18 @@ module pingpong_buffer #(
     assign dbg_read_tap = {muxed_reg_nz, active_raw_nz, bank1_raw_nz, bank0_raw_nz};
 
     assign dbg_bus = {
-        dbg_bank1_we_seen_wr,
-        dbg_bank0_we_seen_wr,
+        dbg_fifo_overflow_seen_wr,
+        dbg_fifo_underflow_seen_rd,
+        dbg_bad_desc_seen_rd,
         dbg_overrun_seen_wr,
         dbg_write_active_seen_wr,
         dbg_capdone_seen_wr,
         dbg_we_seen_wr,
         frame_valid,
-        pending_bank_rd,
-        pending_valid_rd,
+        desc_fifo_empty,
+        desc_fifo_full,
         active_bank_rd,
-        bank1_commit_tog_wr,
-        bank0_commit_tog_wr,
+        commit_inflight_wr,
         capture_active_wr,
         writing_active_bank,
         active_bank_sync2_wr,
