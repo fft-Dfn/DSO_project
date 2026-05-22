@@ -1,7 +1,7 @@
 {
     "args": [
         "-o",
-        "pingpong_bram_refact",
+        "pingpong_bram_refact_1",
         "--base_path",
         "D:\\Document\\Code_field_vscode\\FPGA_Verilog\\efinity\\DSO_project\\ip",
         "--vlnv",
@@ -14,8 +14,8 @@
     ],
     "conf": {
         "ADDR_WIDTH_A": "10",
-        "RESET_A_ENABLE": "0",
-        "RESET_B_ENABLE": "0",
+        "RESET_A_ENABLE": "1",
+        "RESET_B_ENABLE": "1",
         "RSTA_POLARITY": "1",
         "RSTB_POLARITY": "1",
         "MEMORY_MODE": "\"SPEED\"",
@@ -29,7 +29,7 @@
         "HexFile_Path": "\"''\"",
         "WIDTH_RATIO": "4",
         "DATA_WIDTH_A": "32",
-        "ADDREN_ENABLE": "0",
+        "ADDREN_ENABLE": "1",
         "ADDREN_POLARITY": "1",
         "CLKA_POLARITY": "1",
         "CLKB_POLARITY": "1",
@@ -40,15 +40,15 @@
         "RESET_RAM_B": "\"ASYNC\"",
         "WEA_ENABLE": "1",
         "WEA_POLARITY": "1",
-        "WEB_ENABLE": "0",
+        "WEB_ENABLE": "1",
         "WEB_POLARITY": "1",
-        "RADDREN_ENABLE": "0",
+        "RADDREN_ENABLE": "1",
         "RADDREN_POLARITY": "1",
-        "WADDREN_ENABLE": "0",
+        "WADDREN_ENABLE": "1",
         "WADDREN_POLARITY": "1",
         "RCLK_POLARITY": "1",
-        "ADDREN_A_ENABLE": "0",
-        "ADDREN_B_ENABLE": "0",
+        "ADDREN_A_ENABLE": "1",
+        "ADDREN_B_ENABLE": "1",
         "ADDRENA_POLARITY": "1",
         "ADDRENB_POLARITY": "1",
         "WE_ENABLE": "1",
@@ -59,10 +59,10 @@
         "RESET_RAM": "\"ASYNC\"",
         "CLK_POLARITY": "1",
         "RE_POLARITY": "1",
-        "RE_ENABLE": "0",
+        "RE_ENABLE": "1",
         "WRITE_MODE": "\"READ_FIRST\"",
         "RESET_OUTREG": "\"ASYNC\"",
-        "RESET_ENABLE": "0",
+        "RESET_ENABLE": "1",
         "RST_POLARITY": "1",
         "CLKEB_POLARITY": "1",
         "CLK_MODE_SDP": "1",
@@ -79,13 +79,13 @@
     "output": {
         "external_script_script": [],
         "external_source_source": [
-            "pingpong_bram_refact\\pingpong_bram_refact_define.vh",
-            "pingpong_bram_refact\\pingpong_bram_refact_tmpl.v",
-            "pingpong_bram_refact\\pingpong_bram_refact_tmpl.vhd",
-            "pingpong_bram_refact\\pingpong_bram_refact.v"
+            "pingpong_bram_refact_1\\pingpong_bram_refact_1_define.vh",
+            "pingpong_bram_refact_1\\pingpong_bram_refact_1_tmpl.v",
+            "pingpong_bram_refact_1\\pingpong_bram_refact_1_tmpl.vhd",
+            "pingpong_bram_refact_1\\pingpong_bram_refact_1.v"
         ]
     },
     "ooc_synthesis": {},
     "sw_version": "2025.2.288.3.8",
-    "generated_date": "2026-03-22T13:50:30.119407+00:00"
+    "generated_date": "2026-04-16T12:53:26.786317+00:00"
 }

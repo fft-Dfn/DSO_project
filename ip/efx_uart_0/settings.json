@@ -1,0 +1,50 @@
+{
+    "args": [
+        "-o",
+        "efx_uart_0",
+        "--base_path",
+        "D:\\Document\\Code_field_vscode\\FPGA_Verilog\\efinity\\DSO_project\\ip",
+        "--vlnv",
+        {
+            "vendor": "efinixinc.com",
+            "library": "serial_interface",
+            "name": "efx_uart",
+            "version": "5.2"
+        }
+    ],
+    "conf": {
+        "BYTE": "4",
+        "CLOCK_FREQ": "50000000",
+        "BAUD": "115200",
+        "ENABLE_PARITY": "1'b0",
+        "FIX_BAUDRATE": "1'b1",
+        "PARITY_MODE": "1'b0",
+        "BOOTUP_CHECK": "1'b0"
+    },
+    "output": {
+        "external_source_source": [
+            "efx_uart_0\\efx_uart_0.v",
+            "efx_uart_0\\efx_uart_0_define.vh",
+            "efx_uart_0\\efx_uart_0_tmpl.v",
+            "efx_uart_0\\efx_uart_0_tmpl.vhd"
+        ],
+        "external_example_example": [
+            "efx_uart_0\\T20F256_devkit\\command_state.v",
+            "efx_uart_0\\T20F256_devkit\\decoder.v",
+            "efx_uart_0\\T20F256_devkit\\encoder.v",
+            "efx_uart_0\\T20F256_devkit\\led_ctl.v",
+            "efx_uart_0\\T20F256_devkit\\resets.v",
+            "efx_uart_0\\T20F256_devkit\\uart_defines.v",
+            "efx_uart_0\\T20F256_devkit\\uart_demo_top.v",
+            "efx_uart_0\\T20F256_devkit\\user_register.v",
+            "efx_uart_0\\T20F256_devkit\\uart_timing_T20.sdc",
+            "efx_uart_0\\T20F256_devkit\\efx_uart_0.v",
+            "efx_uart_0\\T20F256_devkit\\efx_uart_0_define.vh",
+            "efx_uart_0\\T20F256_devkit\\uart_demo.peri.xml",
+            "efx_uart_0\\T20F256_devkit\\uart_demo.xml"
+        ]
+    },
+    "ooc_synthesis": {},
+    "sw_version": "2025.2.288.3.8",
+    "generated_date": "2026-04-16T13:25:05.189918+00:00"
+}

@@ -35,6 +35,7 @@ module waveform_renderer #(
     input  wire [7:0]   trig_level,
     input  wire [31:0]  sample_div,
     input  wire [2:0]   sel_trig,
+    
     input  wire [2:0]   flash_ui_state,
     input  wire         flash_view_enable,
     input  wire [23:0]  flash_jedec_id,
@@ -65,7 +66,7 @@ module waveform_renderer #(
     localparam [15:0] COLOR_CH4_DIM    = 16'h7BC0;
     localparam [15:0] COLOR_CH1_BOOST  = 16'hFC10;
     localparam [15:0] COLOR_CH2_BOOST  = 16'h87F0;
-    localparam [15:0] COLOR_CH3_BOOST  = 16'h83FF;
+    localparam [15:0] COLOR_CH3_BOOST  = 16'h081F;
     localparam [15:0] COLOR_CH4_BOOST  = 16'hFFF0;
     localparam [15:0] COLOR_UI_BG      = 16'h18C3;
     localparam [15:0] COLOR_UI_BTN     = 16'h2128;
@@ -74,6 +75,9 @@ module waveform_renderer #(
     localparam [15:0] COLOR_UI_TEXT    = 16'hAFE5;
     localparam [15:0] COLOR_DBG_ON     = 16'h07E0;
     localparam [15:0] COLOR_DBG_OFF    = 16'h8000;
+
+    // Set to 1'b0 and rebuild to hide the top-right debugger overlay.
+    localparam DEBUGGER_ENABLE = 1'b0;
 
     localparam DBG_X0     = 11'd520;
     localparam DBG_Y0     = 10'd10;
@@ -700,7 +704,8 @@ module waveform_renderer #(
         dbg_cell_y0 = 10'd0;
         dbg_idx_next = 8'd0;
 
-        if ((pix_x >= DBG_X0) && (pix_x < (DBG_X0 + DBG_W)) &&
+        if (DEBUGGER_ENABLE &&
+            (pix_x >= DBG_X0) && (pix_x < (DBG_X0 + DBG_W)) &&
             (pix_y >= DBG_Y0) && (pix_y < (DBG_Y0 + DBG_H))) begin
             dbg_rel_x = pix_x - DBG_X0;
             dbg_rel_y = pix_y - DBG_Y0;
@@ -725,11 +730,13 @@ module waveform_renderer #(
     always @(*) begin
         trig_type_hit = 1'b0;
         trig_type_color = COLOR_GRID;
-        if ((pix_x >= DBG_X0) && (pix_x < (DBG_X0 + 12)) &&
+        if (DEBUGGER_ENABLE &&
+            (pix_x >= DBG_X0) && (pix_x < (DBG_X0 + 12)) &&
             (pix_y >= 10'd124) && (pix_y < 10'd136)) begin
             trig_type_hit = 1'b1;
             trig_type_color = debug_status[64] ? 16'h07E0 : 16'h2104;
-        end else if ((pix_x >= (DBG_X0 + 14)) && (pix_x < (DBG_X0 + 26)) &&
+        end else if (DEBUGGER_ENABLE &&
+                     (pix_x >= (DBG_X0 + 14)) && (pix_x < (DBG_X0 + 26)) &&
                      (pix_y >= 10'd124) && (pix_y < 10'd136)) begin
             trig_type_hit = 1'b1;
             trig_type_color = debug_status[65] ? 16'hF800 : 16'h2104;

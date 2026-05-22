@@ -87,6 +87,7 @@ module flash_wave_store_load #(
     (* ram_style = "block" *) reg [DATA_W-1:0] flash_view_buf [0:SAMPLE_CNT-1];
 
     // STORE front-end capture control.
+    reg                  snap_wait_start;
     reg                  snap_active;
     reg                  snapshot_ready;
     reg [1:0]            snap_ch_sel;
@@ -121,7 +122,14 @@ module flash_wave_store_load #(
     // Guards against stuck SPI operation.
     reg [31:0]           txn_watchdog_cnt;
 
-    wire                 txn_active = snap_active || snapshot_ready || op_active || spi_busy;
+    wire                 snap_start_sample = snap_wait_start &&
+                                             fetch_sample_valid &&
+                                             (fetch_sample_idx == {ADDR_W{1'b0}});
+    wire                 snap_capture_fire = (snap_active || snap_start_sample) &&
+                                             fetch_sample_valid;
+
+    wire                 txn_active = snap_wait_start || snap_active || snapshot_ready ||
+                                      op_active || spi_busy;
 
     wire                 watchdog_active = op_active || spi_busy;
     wire                 timeout_hit = watchdog_active && (txn_watchdog_cnt >= (TXN_TIMEOUT_CYCLES - 1));
@@ -179,6 +187,7 @@ module flash_wave_store_load #(
             flash_jedec_valid    <= 1'b0;
             jedec_probe_pending  <= 1'b1;
             txn_watchdog_cnt     <= 32'd0;
+            snap_wait_start      <= 1'b0;
         end else begin
             spi_wr_req          <= 1'b0;
             spi_rd_req          <= 1'b0;
@@ -198,6 +207,7 @@ module flash_wave_store_load #(
             // Priority 1: explicit cancel from UI.
             if (cancel_req && txn_active) begin
                 snap_active          <= 1'b0;
+                snap_wait_start      <= 1'b0;
                 snapshot_ready       <= 1'b0;
                 op_active            <= 1'b0;
                 op_is_load           <= 1'b0;
@@ -208,6 +218,7 @@ module flash_wave_store_load #(
             end else if (timeout_hit) begin
                 // Priority 2: watchdog timeout abort.
                 snap_active          <= 1'b0;
+                snap_wait_start      <= 1'b0;
                 snapshot_ready       <= 1'b0;
                 op_active            <= 1'b0;
                 op_is_load           <= 1'b0;
@@ -228,7 +239,8 @@ module flash_wave_store_load #(
                     jedec_probe_pending <= 1'b0;
                 end else if (!txn_active) begin
                     if (store_req) begin
-                        snap_active          <= 1'b1;
+                        snap_wait_start      <= 1'b1;
+                        snap_active          <= 1'b0;
                         snapshot_ready       <= 1'b0;
                         snap_ch_sel          <= store_ch_sel;
                         flash_req_ack_pulse  <= 1'b1;
@@ -247,16 +259,22 @@ module flash_wave_store_load #(
                     end
                 end
 
-                // STORE path: capture selected channel from fetched frame stream.
-                if (snap_active && fetch_sample_valid) begin
+                // STORE path: wait for the next fetched frame start, then capture 1024 samples.
+                if (snap_start_sample) begin
+                    snap_wait_start <= 1'b0;
+                    snap_active     <= 1'b1;
+                end
+
+                if (snap_capture_fire) begin
                     snap_wr_en   <= 1'b1;
                     snap_wr_addr <= fetch_sample_idx;
                     snap_wr_data <= pick_ch_sample(fetch_sample_packed, snap_ch_sel);
                 end
 
-                if (snap_active && fetch_frame_done) begin
-                    snap_active    <= 1'b0;
-                    snapshot_ready <= 1'b1;
+                if (snap_capture_fire && fetch_frame_done) begin
+                    snap_wait_start <= 1'b0;
+                    snap_active     <= 1'b0;
+                    snapshot_ready  <= 1'b1;
                 end
 
                 // Launch STORE SPI write once full snapshot is available.

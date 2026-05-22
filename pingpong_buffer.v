@@ -17,7 +17,7 @@
 module pingpong_buffer #(
     parameter DATA_W = 8,
     parameter ADDR_W = 10,
-    parameter USE_INFERRED_BRAM = 1'b1
+    parameter USE_INFERRED_BRAM = 1'b0
 )(
     input  wire                  rst_n_write,
     input  wire                  rst_n_read,
@@ -84,29 +84,47 @@ module pingpong_buffer #(
                 bank1_rdata_b_r <= bank1_mem[raddr];
             end
         end else begin : g_ip_bram
-            pingpong_bram_refact u_pingpong_bram_bank0 (
+            // Align IP-BRAM read behavior to inferred-BRAM path:
+            // add one explicit clk_read register stage so both backends present
+            // the same bank*_rdata_b timing to downstream logic.
+            wire [31:0] bank0_rdata_b_ip;
+            wire [31:0] bank1_rdata_b_ip;
+            reg  [31:0] bank0_rdata_b_r;
+            reg  [31:0] bank1_rdata_b_r;
+
+            assign bank0_rdata_b = bank0_rdata_b_r;
+            assign bank1_rdata_b = bank1_rdata_b_r;
+
+            pingpong_bram_refact_1 u_pingpong_bram_bank0 (
                 .we_a    (bank0_we_a),
+                .we_b    (1'b0),
                 .addr_a  (waddr),
                 .wdata_a (wdata_packed),
                 .rdata_a (bank0_rdata_a_unused),
-                .rdata_b (bank0_rdata_b),
+                .rdata_b (bank0_rdata_b_ip),
                 .addr_b  (raddr),
                 .wdata_b (32'd0),
                 .clk_a   (clk_write),
                 .clk_b   (clk_read)
             );
 
-            pingpong_bram_refact u_pingpong_bram_bank1 (
+            pingpong_bram_refact_1 u_pingpong_bram_bank1 (
                 .we_a    (bank1_we_a),
+                .we_b    (1'b0),
                 .addr_a  (waddr),
                 .wdata_a (wdata_packed),
                 .rdata_a (bank1_rdata_a_unused),
-                .rdata_b (bank1_rdata_b),
+                .rdata_b (bank1_rdata_b_ip),
                 .addr_b  (raddr),
                 .wdata_b (32'd0),
                 .clk_a   (clk_write),
                 .clk_b   (clk_read)
             );
+
+            always @(posedge clk_read) begin
+                bank0_rdata_b_r <= bank0_rdata_b_ip;
+                bank1_rdata_b_r <= bank1_rdata_b_ip;
+            end
         end
     endgenerate
 
@@ -138,6 +156,7 @@ module pingpong_buffer #(
     reg [15:0]  desc_fifo_wdata;
     reg         desc_fifo_rd_en;
     wire [31:0] desc_fifo_rdata;
+    wire        desc_fifo_rd_valid;
     wire        desc_fifo_full;
     wire        desc_fifo_prog_full;
     wire        desc_fifo_empty;
@@ -153,6 +172,7 @@ module pingpong_buffer #(
         .prog_full_o     (desc_fifo_prog_full),
         .full_o          (desc_fifo_full),
         .empty_o         (desc_fifo_empty),
+        .rd_valid_o      (desc_fifo_rd_valid),
         .wr_clk_i        (clk_write),
         .rd_clk_i        (clk_read),
         .wr_en_i         (desc_fifo_wr_en),
@@ -174,9 +194,8 @@ module pingpong_buffer #(
     reg [15:0] desc_word0_wr;
     reg [15:0] desc_word1_wr;
 
-    localparam [1:0] POP_WAIT_CYCLES = 2'd2;
     reg        pop_active_rd;
-    reg [1:0]  pop_wait_rd;
+    reg [3:0]  pop_timeout_rd;
 
     wire write_bank_sel = capture_active_wr ? capture_bank_wr : wr_bank_sel;
     wire safe_idle_bank_sel = frame_valid_sync2_wr ? ~active_bank_sync2_wr : wr_bank_sel;
@@ -268,9 +287,9 @@ module pingpong_buffer #(
                     overflow <= 1'b1;
                     dbg_overrun_seen_wr <= 1'b1;
                 end else if (!commit_inflight_wr && (desc_push_state_wr == PUSH_IDLE)) begin
-                    // Main + shadow descriptor words (16b each) to build one 32b read record.
-                    desc_word0_wr      <= {2'b10, capture_bank_wr, frame_start_addr[9:0], 3'b101};
-                    desc_word1_wr      <= {2'b01, capture_bank_wr, frame_start_addr[9:0], 3'b010};
+                    // Write duplicated 16-bit payload so 32-bit read is order-insensitive.
+                    desc_word0_wr      <= {capture_bank_wr, frame_start_addr[9:0], 5'b10101};
+                    desc_word1_wr      <= {capture_bank_wr, frame_start_addr[9:0], 5'b10101};
                     desc_push_state_wr <= PUSH_W0;
                     commit_inflight_wr <= 1'b1;
                 end else begin
@@ -318,7 +337,7 @@ module pingpong_buffer #(
             desc_fifo_rd_en               <= 1'b0;
             active_bank_rd                <= 1'b0;
             pop_active_rd                 <= 1'b0;
-            pop_wait_rd                   <= 2'd0;
+            pop_timeout_rd                <= 4'd0;
             frame_valid                   <= 1'b0;
             active_frame_start_addr       <= {ADDR_W{1'b0}};
             dbg_rd_switch_seen            <= 1'b0;
@@ -332,40 +351,52 @@ module pingpong_buffer #(
                 dbg_fifo_underflow_seen_rd <= 1'b1;
 
             if (pop_active_rd) begin
-                if (pop_wait_rd != 2'd0) begin
-                    pop_wait_rd <= pop_wait_rd - 1'b1;
-                end else begin
-                    // Descriptor order can be upper/lower or lower/upper depending internal endian mapping.
-                    if ((desc_fifo_rdata[31:30] == 2'b10) &&
-                        (desc_fifo_rdata[15:14] == 2'b01) &&
-                        (desc_fifo_rdata[18:16] == 3'b101) &&
-                        (desc_fifo_rdata[2:0]   == 3'b010) &&
-                        (desc_fifo_rdata[29:19] == desc_fifo_rdata[13:3])) begin
-                        active_bank_rd          <= desc_fifo_rdata[29];
-                        active_frame_start_addr <= desc_fifo_rdata[28:19];
+                if (desc_fifo_rd_valid) begin
+                    // Primary decode: duplicated 16b words should be equal.
+                    if ((desc_fifo_rdata[31:16] == desc_fifo_rdata[15:0]) &&
+                        (desc_fifo_rdata[4:0] == 5'b10101)) begin
+                        active_bank_rd          <= desc_fifo_rdata[15];
+                        active_frame_start_addr <= desc_fifo_rdata[14:5];
                         frame_valid             <= 1'b1;
                         dbg_rd_switch_seen      <= 1'b1;
-                    end else if ((desc_fifo_rdata[15:14] == 2'b10) &&
-                                 (desc_fifo_rdata[31:30] == 2'b01) &&
-                                 (desc_fifo_rdata[2:0]   == 3'b101) &&
-                                 (desc_fifo_rdata[18:16] == 3'b010) &&
-                                 (desc_fifo_rdata[13:3]  == desc_fifo_rdata[29:19])) begin
-                        active_bank_rd          <= desc_fifo_rdata[13];
-                        active_frame_start_addr <= desc_fifo_rdata[12:3];
+                    end else if (desc_fifo_rdata[4:0] == 5'b10101) begin
+                        // Fallback: use low half if marker is valid.
+                        active_bank_rd          <= desc_fifo_rdata[15];
+                        active_frame_start_addr <= desc_fifo_rdata[14:5];
                         frame_valid             <= 1'b1;
                         dbg_rd_switch_seen      <= 1'b1;
+                        dbg_bad_desc_seen_rd    <= 1'b1;
+                    end else if (desc_fifo_rdata[20:16] == 5'b10101) begin
+                        // Fallback: use high half if marker is valid.
+                        active_bank_rd          <= desc_fifo_rdata[31];
+                        active_frame_start_addr <= desc_fifo_rdata[30:21];
+                        frame_valid             <= 1'b1;
+                        dbg_rd_switch_seen      <= 1'b1;
+                        dbg_bad_desc_seen_rd    <= 1'b1;
                     end else begin
+                        // Last-resort: still consume to avoid deadlock.
+                        active_bank_rd          <= desc_fifo_rdata[15];
+                        active_frame_start_addr <= desc_fifo_rdata[14:5];
+                        frame_valid             <= 1'b1;
                         dbg_bad_desc_seen_rd    <= 1'b1;
                     end
 
-                    // One descriptor popped from FIFO, release write-side rearm lock.
-                    consume_tog_rd  <= ~consume_tog_rd;
-                    pop_active_rd   <= 1'b0;
+                    consume_tog_rd   <= ~consume_tog_rd;
+                    pop_active_rd    <= 1'b0;
+                    pop_timeout_rd   <= 4'd0;
+                end else begin
+                    pop_timeout_rd <= pop_timeout_rd + 1'b1;
+                    if (&pop_timeout_rd) begin
+                        dbg_bad_desc_seen_rd <= 1'b1;
+                        consume_tog_rd       <= ~consume_tog_rd;
+                        pop_active_rd        <= 1'b0;
+                        pop_timeout_rd       <= 4'd0;
+                    end
                 end
             end else if ((!frame_valid || rd_frame_done) && !desc_fifo_empty && !desc_fifo_rst_busy) begin
                 desc_fifo_rd_en <= 1'b1;
                 pop_active_rd   <= 1'b1;
-                pop_wait_rd     <= POP_WAIT_CYCLES;
+                pop_timeout_rd  <= 4'd0;
             end
         end
     end

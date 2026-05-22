@@ -1,0 +1,56 @@
+{
+    "args": [
+        "-o",
+        "efx_axi_interconnect_0",
+        "--base_path",
+        "D:\\Document\\Code_field_vscode\\FPGA_Verilog\\efinity\\DSO_project\\ip",
+        "--vlnv",
+        {
+            "vendor": "efinixinc.com",
+            "library": "axi_infra",
+            "name": "efx_axi_interconnect",
+            "version": "5.5"
+        }
+    ],
+    "conf": {
+        "ARB_MODE": "\"PRIORITY\"",
+        "S_PORTS": "1",
+        "TABLE0_AXI_S0__MIN": "32'd0",
+        "TABLE0_AXI_S1__MIN": "32'd268435456",
+        "TABLE0_AXI_S2__MIN": "32'd285212672",
+        "TABLE0_AXI_S3__MIN": "32'd286261248",
+        "TABLE0_AXI_S4__MIN": "32'd536870912",
+        "TABLE0_AXI_S5__MIN": "32'd805306368",
+        "TABLE0_AXI_S6__MIN": "32'd1073741824",
+        "TABLE0_AXI_S7__MIN": "32'd1090519040",
+        "TABLE0_AXI_S0__MAX": "32'd28",
+        "TABLE0_AXI_S1__MAX": "32'd24",
+        "TABLE0_AXI_S2__MAX": "32'd12",
+        "TABLE0_AXI_S3__MAX": "32'd20",
+        "TABLE0_AXI_S4__MAX": "32'd28",
+        "TABLE0_AXI_S5__MAX": "32'd28",
+        "TABLE0_AXI_S6__MAX": "32'd24",
+        "TABLE0_AXI_S7__MAX": "32'd20",
+        "DATA_WIDTH": "32",
+        "ADDR_WIDTH": "32",
+        "M_PORTS": "8",
+        "ID_WIDTH": "8",
+        "USER_WIDTH": "3",
+        "PROTOCOL": "\"AXI4\""
+    },
+    "output": {
+        "external_script_generator": [],
+        "external_source_source": [
+            "efx_axi_interconnect_0\\efx_axi_interconnect_0.v",
+            "efx_axi_interconnect_0\\efx_axi_interconnect_0_define.vh",
+            "efx_axi_interconnect_0\\efx_axi_interconnect_0_tmpl.v",
+            "efx_axi_interconnect_0\\efx_axi_interconnect_0_tmpl.vhd"
+        ],
+        "external_testbench_modelsim": [
+            "efx_axi_interconnect_0\\Testbench\\modelsim\\efx_axi_interconnect_0.v"
+        ]
+    },
+    "ooc_synthesis": {},
+    "sw_version": "2025.2.288.3.8",
+    "generated_date": "2026-04-16T13:28:20.188919+00:00"
+}

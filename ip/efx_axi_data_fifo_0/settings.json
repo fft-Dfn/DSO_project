@@ -1,0 +1,50 @@
+{
+    "args": [
+        "-o",
+        "efx_axi_data_fifo_0",
+        "--base_path",
+        "D:\\Document\\Code_field_vscode\\FPGA_Verilog\\efinity\\DSO_project\\ip",
+        "--vlnv",
+        {
+            "vendor": "efinixinc.com",
+            "library": "axi_infra",
+            "name": "efx_axi_data_fifo",
+            "version": "5.3"
+        }
+    ],
+    "conf": {
+        "PROTOCOL": "\"AXI4\"",
+        "RW_MODE": "\"READ_WRITE\"",
+        "ADDR_WIDTH": "32",
+        "DATA_WIDTH": "32",
+        "ID_WIDTH": "4",
+        "AWUSER_WIDTH": "0",
+        "ARUSER_WIDTH": "0",
+        "WUSER_WIDTH": "0",
+        "RUSER_WIDTH": "0",
+        "BUSER_WIDTH": "0",
+        "WFIFO_DEPTH": "512",
+        "WFIFO_DELAY": "0",
+        "RFIFO_DEPTH": "512",
+        "AWFIFO_DEPTH": "32",
+        "ARFIFO_DEPTH": "32",
+        "WFIFO_diabled_32_0": "0",
+        "WFIFO_enable_512": "0",
+        "RFIFO_disabled_32_0": "0",
+        "RFIFO_enable_512": "0"
+    },
+    "output": {
+        "external_source_source": [
+            "efx_axi_data_fifo_0\\efx_axi_data_fifo_0.v",
+            "efx_axi_data_fifo_0\\efx_axi_data_fifo_0_define.vh",
+            "efx_axi_data_fifo_0\\efx_axi_data_fifo_0_tmpl.v",
+            "efx_axi_data_fifo_0\\efx_axi_data_fifo_0_tmpl.vhd"
+        ],
+        "external_testbench_modelsim": [
+            "efx_axi_data_fifo_0\\Testbench\\modelsim\\efx_axi_data_fifo_0.v"
+        ]
+    },
+    "ooc_synthesis": {},
+    "sw_version": "2025.2.288.3.8",
+    "generated_date": "2026-04-16T13:27:22.201392+00:00"
+}

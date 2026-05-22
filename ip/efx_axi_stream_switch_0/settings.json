@@ -1,0 +1,60 @@
+{
+    "args": [
+        "-o",
+        "efx_axi_stream_switch_0",
+        "--base_path",
+        "D:\\Document\\Code_field_vscode\\FPGA_Verilog\\efinity\\DSO_project\\ip",
+        "--vlnv",
+        {
+            "vendor": "efinixinc.com",
+            "library": "axi_infra",
+            "name": "efx_axi_stream_switch",
+            "version": "5.4"
+        }
+    ],
+    "conf": {
+        "DEST_WIDTH": "2",
+        "ENABLE_TSTRB": "0",
+        "ENABLE_TKEEP": "0",
+        "USER_WIDTH": "0",
+        "ID_WIDTH": "0",
+        "M_PORTS": "2",
+        "S_PORTS": "4",
+        "TABLE0_AXI_S0__MIN": "32'd0",
+        "TABLE0_AXI_S0__MAX": "32'd1",
+        "TABLE0_AXI_S1__MIN": "32'd2",
+        "TABLE0_AXI_S2__MIN": "32'd0",
+        "TABLE0_AXI_S3__MIN": "32'd0",
+        "TABLE0_AXI_S4__MIN": "32'd0",
+        "TABLE0_AXI_S5__MIN": "32'd0",
+        "TABLE0_AXI_S6__MIN": "32'd0",
+        "TABLE0_AXI_S7__MIN": "32'd0",
+        "TABLE0_AXI_S1__MAX": "32'd3",
+        "TABLE0_AXI_S2__MAX": "32'd0",
+        "TABLE0_AXI_S3__MAX": "32'd0",
+        "TABLE0_AXI_S4__MAX": "32'd0",
+        "TABLE0_AXI_S5__MAX": "32'd0",
+        "TABLE0_AXI_S6__MAX": "32'd0",
+        "TABLE0_AXI_S7__MAX": "32'd0",
+        "ARB_MODE": "\"ROUND_ROBIN_1\"",
+        "DATA_BYTE": "1",
+        "MAX_XFER_BYTE": "777",
+        "MAX_TVALID_LOW": "384",
+        "TLAST_EN": "1"
+    },
+    "output": {
+        "external_script_generator": [],
+        "external_source_source": [
+            "efx_axi_stream_switch_0\\efx_axi_stream_switch_0.v",
+            "efx_axi_stream_switch_0\\efx_axi_stream_switch_0_define.vh",
+            "efx_axi_stream_switch_0\\efx_axi_stream_switch_0_tmpl.v",
+            "efx_axi_stream_switch_0\\efx_axi_stream_switch_0_tmpl.vhd"
+        ],
+        "external_testbench_modelsim": [
+            "efx_axi_stream_switch_0\\Testbench\\modelsim\\efx_axi_stream_switch_0.v"
+        ]
+    },
+    "ooc_synthesis": {},
+    "sw_version": "2025.2.288.3.8",
+    "generated_date": "2026-04-16T13:30:22.642946+00:00"
+}

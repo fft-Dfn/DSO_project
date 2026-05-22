@@ -115,6 +115,7 @@ module vga_stream_player #(
     reg [10:0]           fetch_req_idx_d3;
     reg                  fetch_use_flash_view;
     reg [31:0]           sample_even_hold;
+    reg [10:0]           fetch_resp_cnt;
     reg                  fetch_start_pending;
     reg [ADDR_W-1:0]     fetch_start_base_addr;
 
@@ -127,9 +128,10 @@ module vga_stream_player #(
     // - live ping-pong BRAM path: use d3
     // - flash view path         : use d2
     wire fetch_resp_valid_now = fetch_use_flash_view ? fetch_req_valid_d2 : fetch_req_valid_d3;
-    wire [10:0] fetch_resp_idx_now = fetch_use_flash_view ? fetch_req_idx_d2 : fetch_req_idx_d3;
-    wire cache_write_fire = fetch_resp_valid_now && fetch_resp_idx_now[0];
-    wire [8:0] cache_write_addr = fetch_resp_idx_now[9:1];
+    // Use response counter to decouple cache fill from exact BRAM response tag latency.
+    wire fetch_resp_accept = fetch_resp_valid_now && (fetch_resp_cnt < SAMPLE_CNT);
+    wire cache_write_fire = fetch_resp_accept && fetch_resp_cnt[0];
+    wire [8:0] cache_write_addr = fetch_resp_cnt[9:1];
     wire [63:0] cache_write_data = pack_minmax_pair(sample_even_hold, sample_packed_fetch);
     wire cache0_we = cache_write_fire && ~fill_cache_sel;
     wire cache1_we = cache_write_fire &&  fill_cache_sel;
@@ -256,6 +258,7 @@ module vga_stream_player #(
             fetch_req_idx_d3        <= 11'd0;
             fetch_use_flash_view    <= 1'b0;
             sample_even_hold        <= 32'd0;
+            fetch_resp_cnt          <= 11'd0;
             fetch_start_pending     <= 1'b0;
             fetch_start_base_addr   <= {ADDR_W{1'b0}};
             fetch_sample_valid      <= 1'b0;
@@ -272,19 +275,21 @@ module vga_stream_player #(
             fetch_frame_done   <= 1'b0;
             persist_copy_resp_valid <= 1'b0;
 
-            if (fetch_resp_valid_now) begin
+            if (fetch_resp_accept) begin
                 fetch_sample_valid  <= 1'b1;
-                fetch_sample_idx    <= fetch_resp_idx_now[ADDR_W-1:0];
+                fetch_sample_idx    <= fetch_resp_cnt[ADDR_W-1:0];
                 fetch_sample_packed <= sample_packed_fetch;
 
-                if (!fetch_resp_idx_now[0]) begin
+                if (!fetch_resp_cnt[0]) begin
                     sample_even_hold <= sample_packed_fetch;
                 end
 
-                if (fetch_resp_idx_now == SAMPLE_CNT - 1) begin
+                if (fetch_resp_cnt == SAMPLE_CNT - 1) begin
                     fill_done <= 1'b1;
                     fetch_frame_done <= 1'b1;
                 end
+
+                fetch_resp_cnt <= fetch_resp_cnt + 1'b1;
             end
 
             // Shift request tags so response index matches data arrival latency.
@@ -352,6 +357,7 @@ module vga_stream_player #(
                 fetch_req_idx       <= 11'd0;
                 fetch_base_addr     <= fetch_start_base_addr;
                 fetch_use_flash_view <= flash_view_enable;
+                fetch_resp_cnt      <= 11'd0;
                 fetch_start_pending <= 1'b0;
             end
         end

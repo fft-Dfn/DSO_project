@@ -56,6 +56,7 @@ module at24c01c_param_persist #(
     localparam [5:0] HS_BOOT_RD_BYTE   = 6'd6;
     localparam [5:0] HS_BOOT_RD_STOP   = 6'd7;
     localparam [5:0] HS_BOOT_CHECK     = 6'd8;
+    
     localparam [5:0] HS_IDLE           = 6'd9;
     localparam [5:0] HS_SAVE_PREP      = 6'd10;
     localparam [5:0] HS_SAVE_START     = 6'd11;

@@ -1,0 +1,37 @@
+{
+    "args": [
+        "-o",
+        "efx_pll_autoreset_0",
+        "--base_path",
+        "D:\\Document\\Code_field_vscode\\FPGA_Verilog\\efinity\\DSO_project\\ip",
+        "--vlnv",
+        {
+            "vendor": "efinixinc.com",
+            "library": "PLL",
+            "name": "efx_pll_autoreset",
+            "version": "1.1"
+        }
+    ],
+    "conf": {
+        "N_FSM": "2"
+    },
+    "output": {
+        "external_source_source": [
+            "efx_pll_autoreset_0\\efx_pll_autoreset_0.v",
+            "efx_pll_autoreset_0\\efx_pll_autoreset_0_define.vh",
+            "efx_pll_autoreset_0\\efx_pll_autoreset_0_tmpl.v",
+            "efx_pll_autoreset_0\\efx_pll_autoreset_0_tmpl.vhd"
+        ],
+        "external_example_T20F256_devkit": [
+            "efx_pll_autoreset_0\\T20F256_devkit\\pll_autoreset_top.v",
+            "efx_pll_autoreset_0\\T20F256_devkit\\pll_autoreset.sdc",
+            "efx_pll_autoreset_0\\T20F256_devkit\\efx_pll_autoreset_0.v",
+            "efx_pll_autoreset_0\\T20F256_devkit\\efx_pll_autoreset_0_define.vh",
+            "efx_pll_autoreset_0\\T20F256_devkit\\pll_autoreset.xml",
+            "efx_pll_autoreset_0\\T20F256_devkit\\pll_autoreset.peri.xml"
+        ]
+    },
+    "ooc_synthesis": {},
+    "sw_version": "2025.2.288.3.8",
+    "generated_date": "2026-04-16T13:25:48.146128+00:00"
+}

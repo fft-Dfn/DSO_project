@@ -1,0 +1,72 @@
+{
+    "args": [
+        "-o",
+        "efx_apb_interconnect_0",
+        "--base_path",
+        "D:\\Document\\Code_field_vscode\\FPGA_Verilog\\efinity\\DSO_project\\ip",
+        "--vlnv",
+        {
+            "vendor": "efinixinc.com",
+            "library": "bridges_and_adaptors",
+            "name": "efx_apb_interconnect",
+            "version": "1.0"
+        }
+    ],
+    "conf": {
+        "MODE": "0",
+        "MASTER_NUM": "32",
+        "ADDR_WIDTH": "32",
+        "DATA_WIDTH": "32",
+        "REG_INPUT": "1'b1",
+        "REG_OUTPUT": "1'b1",
+        "OPT_LATENCY": "1'b0",
+        "DATA_WIDTH_DIV_8": "4",
+        "PRIORITY_M00_user": "1",
+        "PRIORITY_M01_user": "2",
+        "PRIORITY_M02_user": "3",
+        "PRIORITY_M03_user": "4",
+        "PRIORITY_M04_user": "5",
+        "PRIORITY_M05_user": "6",
+        "PRIORITY_M06_user": "7",
+        "PRIORITY_M07_user": "8",
+        "PRIORITY_M08_user": "9",
+        "PRIORITY_M09_user": "10",
+        "PRIORITY_M10_user": "11",
+        "PRIORITY_M11_user": "12",
+        "PRIORITY_M12_user": "13",
+        "PRIORITY_M13_user": "14",
+        "PRIORITY_M14_user": "15",
+        "PRIORITY_M15_user": "16",
+        "PRIORITY_M16_user": "17",
+        "PRIORITY_M17_user": "18",
+        "PRIORITY_M18_user": "19",
+        "PRIORITY_M19_user": "20",
+        "PRIORITY_M20_user": "21",
+        "PRIORITY_M21_user": "22",
+        "PRIORITY_M22_user": "23",
+        "PRIORITY_M23_user": "24",
+        "PRIORITY_M24_user": "25",
+        "PRIORITY_M25_user": "26",
+        "PRIORITY_M26_user": "27",
+        "PRIORITY_M27_user": "28",
+        "PRIORITY_M28_user": "29",
+        "PRIORITY_M29_user": "30",
+        "PRIORITY_M30_user": "31",
+        "PRIORITY_M31_user": "32",
+        "OPTIONAL_SIGNAL_user": "1'b0"
+    },
+    "output": {
+        "external_source_source": [
+            "efx_apb_interconnect_0\\efx_apb_interconnect_0_tmpl.sv",
+            "efx_apb_interconnect_0\\efx_apb_interconnect_0_tmpl.vhd",
+            "efx_apb_interconnect_0\\efx_apb_interconnect_0_define.svh",
+            "efx_apb_interconnect_0\\efx_apb_interconnect_0.sv"
+        ],
+        "external_testbench_modelsim": [
+            "efx_apb_interconnect_0\\Testbench\\modelsim\\efx_apb_interconnect_0.sv"
+        ]
+    },
+    "ooc_synthesis": {},
+    "sw_version": "2025.2.288.3.8",
+    "generated_date": "2026-04-16T13:29:15.525456+00:00"
+}
